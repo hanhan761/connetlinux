@@ -9,17 +9,19 @@
 
 当前仓库完成的是第一阶段。采集器不会安装软件、修改配置、重启服务或开放端口。
 
-## 在你创建的文件夹中执行
+## 手动传入脚本后执行
 
-你自己创建一个文件夹并进入该文件夹。采集器不会替你创建工作目录。
+你自己创建一个文件夹，把 `collect_linux_info.py` 传入该文件夹，然后进入该文件夹。
 
-进入文件夹后执行这一条命令：
+直接执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hanhan761/connetlinux/main/collect_linux_info.py -o collect_linux_info.py && python3 collect_linux_info.py --network-check --output workstation-report.json
+python3 collect_linux_info.py --output workstation-report.json
 ```
 
-该命令只会在当前文件夹生成：
+这是默认的离线采集模式，不访问 GitHub、Tailscale 登录服务或 PyPI。执行时会逐项显示当前检查进度。
+
+当前文件夹最终包含：
 
 ```text
 collect_linux_info.py
@@ -34,12 +36,18 @@ workstation-report.json
 
 不要把真实报告提交到 GitHub。报告包含本机用户名、主机名和局域网/Tailscale 地址，但不包含密码、Token、环境变量和 SSH 私钥。
 
+只有后续确实需要检查出站网络时，才运行：
+
+```bash
+python3 collect_linux_info.py --network-check --output workstation-report.json
+```
+
 ## 可选的只读 sudo 检查
 
 普通用户无法读取某些发行版的有效 SSH 和防火墙配置。只有已经配置免密码 sudo，并且明确需要这部分信息时，才使用：
 
 ```bash
-python3 collect_linux_info.py --allow-sudo --network-check --output workstation-report.json
+python3 collect_linux_info.py --allow-sudo --output workstation-report.json
 ```
 
 `--allow-sudo` 只会调用 `sudo -n`，不会弹出密码输入，也不会修改配置。

@@ -19,10 +19,10 @@ import socket
 import subprocess
 import sys
 import time
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
 
 
-COLLECTOR_VERSION = "0.1.0"
+COLLECTOR_VERSION = "0.2.0"
 SCHEMA_VERSION = "1.0"
 COMMAND_TIMEOUT_SECONDS = 8
 MAX_COMMAND_OUTPUT_CHARS = 32_000
@@ -742,7 +742,12 @@ def build_warnings(report: Dict[str, Any]) -> List[str]:
     return warnings
 
 
-def collect_report(*, allow_sudo: bool, network_check: bool) -> Dict[str, Any]:
+def collect_report(
+    *,
+    allow_sudo: bool,
+    network_check: bool,
+    progress: Optional[Callable[[str], None]] = None,
+) -> Dict[str, Any]:
     report: Dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "collector": {
@@ -760,23 +765,37 @@ def collect_report(*, allow_sudo: bool, network_check: bool) -> Dict[str, Any]:
             "contains_tokens_or_passwords": False,
             "notice": "Local IP addresses, hostnames and account names are operational data. Share this report privately and never commit it.",
         },
-        "system": collect_system(),
-        "identity": collect_identity(),
-        "cpu": collect_cpu(),
-        "memory": collect_memory(),
-        "storage": collect_storage(),
-        "gpu": collect_gpu(),
-        "network": collect_network(),
-        "tailscale": collect_tailscale(),
-        "ssh": collect_ssh(allow_sudo),
-        "firewall": collect_firewall(allow_sudo),
-        "power": collect_power(),
-        "time_sync": collect_time_sync(),
-        "security_modules": collect_security_modules(),
-        "tools": collect_tools(),
     }
+
+    collectors: List[Tuple[str, str, Callable[[], Dict[str, Any]]]] = [
+        ("system", "system", collect_system),
+        ("identity", "user identity", collect_identity),
+        ("cpu", "CPU", collect_cpu),
+        ("memory", "memory and swap", collect_memory),
+        ("storage", "storage", collect_storage),
+        ("gpu", "GPU", collect_gpu),
+        ("network", "local network", collect_network),
+        ("tailscale", "Tailscale", collect_tailscale),
+        ("ssh", "OpenSSH", lambda: collect_ssh(allow_sudo)),
+        ("firewall", "firewall", lambda: collect_firewall(allow_sudo)),
+        ("power", "power and sleep settings", collect_power),
+        ("time_sync", "time synchronization", collect_time_sync),
+        ("security_modules", "security modules", collect_security_modules),
+        ("tools", "compute tools", collect_tools),
+    ]
     if network_check:
-        report["outbound_network_checks"] = collect_network_checks()
+        collectors.append(
+            ("outbound_network_checks", "optional outbound network", collect_network_checks)
+        )
+
+    total_steps = len(collectors) + 1
+    for index, (key, label, collector) in enumerate(collectors, start=1):
+        if progress:
+            progress(f"[{index}/{total_steps}] Collecting {label}...")
+        report[key] = collector()
+
+    if progress:
+        progress(f"[{total_steps}/{total_steps}] Building readiness summary...")
     report["readiness"] = build_readiness(report)
     report["warnings"] = build_warnings(report)
     return report
@@ -877,10 +896,14 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     output_path = args.output or default_output_path()
+    progress = None
+    if not args.quiet:
+        progress = lambda message: print(message, file=sys.stderr, flush=True)
     try:
         report = collect_report(
             allow_sudo=bool(args.allow_sudo),
             network_check=bool(args.network_check),
+            progress=progress,
         )
         write_report(report, output_path)
     except (OSError, ValueError) as exc:
