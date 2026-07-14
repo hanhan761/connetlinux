@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import pathlib
 import sys
+import tempfile
 import unittest
 
 
@@ -63,6 +64,16 @@ class CollectorParsingTests(unittest.TestCase):
         self.assertTrue(any("OpenSSH" in warning for warning in warnings))
         self.assertTrue(any("Tailscale" in warning for warning in warnings))
         self.assertTrue(any("20 GiB" in warning for warning in warnings))
+
+    def test_write_report_does_not_create_output_directories(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            missing_directory = pathlib.Path(temporary_directory) / "not-created"
+            output_path = missing_directory / "report.json"
+
+            with self.assertRaises(FileNotFoundError):
+                MODULE.write_report({"schema_version": "test"}, output_path)
+
+            self.assertFalse(missing_directory.exists())
 
 
 if __name__ == "__main__":

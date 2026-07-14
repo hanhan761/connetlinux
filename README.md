@@ -9,24 +9,27 @@
 
 当前仓库完成的是第一阶段。采集器不会安装软件、修改配置、重启服务或开放端口。
 
-## 一条命令完成体检
+## 在你创建的文件夹中执行
 
-在准备作为工作站的 Linux 电脑上执行：
+你自己创建一个文件夹并进入该文件夹。采集器不会替你创建工作目录。
+
+进入文件夹后执行这一条命令：
 
 ```bash
-mkdir -p "$HOME/connetlinux" && curl -fsSL https://raw.githubusercontent.com/hanhan761/connetlinux/main/collect_linux_info.py -o "$HOME/connetlinux/collect_linux_info.py" && python3 "$HOME/connetlinux/collect_linux_info.py" --output "$HOME/connetlinux/workstation-report.json"
+curl -fsSL https://raw.githubusercontent.com/hanhan761/connetlinux/main/collect_linux_info.py -o collect_linux_info.py && python3 collect_linux_info.py --network-check --output workstation-report.json
 ```
 
-如果还希望检查 Linux 到 GitHub、Tailscale 和 PyPI 的出站网络：
+该命令只会在当前文件夹生成：
 
-```bash
-python3 "$HOME/connetlinux/collect_linux_info.py" --network-check --output "$HOME/connetlinux/workstation-report.json"
+```text
+collect_linux_info.py
+workstation-report.json
 ```
 
 执行完成后，把下面这个文件**私下提供给维护人员**：
 
 ```text
-~/connetlinux/workstation-report.json
+./workstation-report.json
 ```
 
 不要把真实报告提交到 GitHub。报告包含本机用户名、主机名和局域网/Tailscale 地址，但不包含密码、Token、环境变量和 SSH 私钥。
@@ -36,10 +39,12 @@ python3 "$HOME/connetlinux/collect_linux_info.py" --network-check --output "$HOM
 普通用户无法读取某些发行版的有效 SSH 和防火墙配置。只有已经配置免密码 sudo，并且明确需要这部分信息时，才使用：
 
 ```bash
-python3 "$HOME/connetlinux/collect_linux_info.py" --allow-sudo --output "$HOME/connetlinux/workstation-report.json"
+python3 collect_linux_info.py --allow-sudo --network-check --output workstation-report.json
 ```
 
 `--allow-sudo` 只会调用 `sudo -n`，不会弹出密码输入，也不会修改配置。
+
+如果 `--output` 指向不存在的目录，脚本会直接报错，不会自动创建目录。
 
 ## 收集内容
 

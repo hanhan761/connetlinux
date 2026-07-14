@@ -825,7 +825,10 @@ def print_summary(report: Dict[str, Any], output_path: pathlib.Path) -> None:
 
 def write_report(report: Dict[str, Any], output_path: pathlib.Path) -> None:
     output_path = output_path.expanduser().resolve()
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    if not output_path.parent.exists():
+        raise FileNotFoundError(f"Output directory does not exist: {output_path.parent}")
+    if not output_path.parent.is_dir():
+        raise NotADirectoryError(f"Output parent is not a directory: {output_path.parent}")
     temporary_path = output_path.with_name(output_path.name + ".tmp")
     payload = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     temporary_path.write_text(payload, encoding="utf-8")
