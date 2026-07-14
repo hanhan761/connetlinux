@@ -1,0 +1,45 @@
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  collector:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.8", "3.11"]
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Compile collector
+        run: python -m py_compile collect_linux_info.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Run Linux smoke collection
+        run: |
+          python collect_linux_info.py --quiet --output /tmp/workstation-report.json
+          python - <<'PY'
+          import json
+
+          with open("/tmp/workstation-report.json", encoding="utf-8") as report_file:
+              report = json.load(report_file)
+
+          assert report["schema_version"] == "1.0"
+          assert report["system"]["platform"] == "Linux"
+          assert report["privacy"]["contains_private_keys"] is False
+          assert report["privacy"]["contains_tokens_or_passwords"] is False
+          PY

@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# Real workstation reports contain private operational metadata.
+workstation-report*.json
+reports/
+*.log
+
+# Never commit runtime credentials or SSH private keys.
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+id_rsa*
+id_ed25519*
+secrets/
+
+# Agent-local planning files.
+task_plan.md
+findings.md
+progress.md
