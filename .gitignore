@@ -18,6 +18,7 @@ reports/
 id_rsa*
 id_ed25519*
 secrets/
+local/
 
 # Agent-local planning files.
 task_plan.md

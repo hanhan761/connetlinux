@@ -5,9 +5,9 @@
 项目采用两阶段流程，避免一条未经检查的安装命令误改 SSH、防火墙或显卡环境：
 
 1. **只读体检**：收集系统、硬件、SSH、Tailscale、防火墙、GPU、存储和休眠状态。
-2. **生成安装方案**：根据真实报告生成可审计、可回滚的一键安装命令。
+2. **建立管理通道**：根据报告安装 OpenSSH/Tailscale，创建可审计、可回滚的专用管理员入口。
 
-当前仓库完成的是第一阶段。采集器不会安装软件、修改配置、重启服务或开放端口。
+采集器不会安装软件、修改配置、重启服务或开放端口。第二阶段安装器默认也只显示计划，必须显式传入 `--apply` 才会修改系统。
 
 ## 手动传入脚本后执行
 
@@ -73,7 +73,56 @@ python3 collect_linux_info.py --allow-sudo --output workstation-report.json
 - 公网 IP 查询和任何入站端口扫描
 - Docker 容器配置、镜像环境变量和应用日志
 
-## 为什么暂时不直接安装
+## 建立 Codex 管理通道
+
+完成体检并确认目标机是受支持的 Ubuntu/Debian 后，只把下面两个文件放进目标 Linux 上同一个新文件夹：
+
+```text
+bootstrap_workstation.py
+codex-admin.pub
+```
+
+`codex-admin.pub` 是管理员客户端生成的 Ed25519 **公钥**。绝对不要把无 `.pub` 后缀的私钥传到 Linux、聊天窗口或 GitHub。
+
+先预览（不改系统）：
+
+```bash
+python3 bootstrap_workstation.py --admin-public-key-file codex-admin.pub
+```
+
+确认后一次执行：
+
+```bash
+sudo python3 bootstrap_workstation.py --apply --admin-public-key-file codex-admin.pub
+```
+
+执行到 Tailscale 时，终端会显示登录 URL。用浏览器登录同一个 Tailnet，等待脚本继续。成功后终端会输出：
+
+```text
+CONNETLINUX_ACCESS_BEGIN
+host=100.x.y.z
+user=codex-admin
+key_fingerprint=SHA256:...
+host_key=...
+backup=/var/backups/connetlinux/...
+CONNETLINUX_ACCESS_END
+```
+
+只需把这一段私下发给维护人员。它不含密钥，但包含私网地址和主机指纹，不要贴到公开 Issue。
+
+安装器会：
+
+- 创建没有可用密码哈希的 `codex-admin` 独立账号并安装公钥
+- 授予该账号免密码 `sudo`，使 Codex 可以完整管理服务器
+- 使用传统 OpenSSH，通过 `AllowUsers` 只接受 Tailscale 地址来源
+- 禁止 root、密码和键盘交互登录
+- UFW 已启用时只新增 `tailscale0:22` 规则；UFW 未启用时不会擅自启用
+- 屏蔽休眠/挂起，避免长计算被桌面电源策略中断
+- 修改前保存状态和相关配置到 `/var/backups/connetlinux/`
+
+它不会修改 Docker 工作负载、NVIDIA/CUDA、项目文件、磁盘数据或路由器端口映射。详细步骤见 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)。
+
+## 后续多人计算
 
 多人计算工作站至少需要先确定以下决策：
 
@@ -84,7 +133,7 @@ python3 collect_linux_info.py --allow-sudo --output workstation-report.json
 - 机器是否会自动休眠，断电后是否自动开机
 - 仅通过 Tailscale 访问，还是必须开放公网入口
 
-报告确认后，第二阶段会提供一个可重复执行的一键安装器，目标结构为：
+管理通道验证后，再通过 SSH 处理 GPU 驱动、磁盘空间和多人账号。目标结构为：
 
 ```text
 用户电脑
@@ -102,6 +151,7 @@ python3 collect_linux_info.py --allow-sudo --output workstation-report.json
 ```bash
 python3 -m unittest discover -s tests -v
 python3 collect_linux_info.py --help
+python3 bootstrap_workstation.py --help
 ```
 
-更多字段说明见 [docs/REPORT.md](docs/REPORT.md)，安全边界见 [SECURITY.md](SECURITY.md)。
+更多字段说明见 [docs/REPORT.md](docs/REPORT.md)，安装流程见 [docs/BOOTSTRAP.md](docs/BOOTSTRAP.md)，安全边界见 [SECURITY.md](SECURITY.md)。

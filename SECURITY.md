@@ -20,14 +20,36 @@
 
 ## 安装器安全原则
 
-第二阶段安装器必须遵守：
+`bootstrap_workstation.py` 遵守：
 
 - 修改前备份 SSH、防火墙和 Tailscale 配置。
-- 先验证密钥登录，再关闭密码登录。
-- 保留本地控制台或第二条 SSH 会话，避免锁死。
-- 默认不开放公网 22，只允许 Tailscale 私网访问。
-- 使用独立普通用户运行计算，不给共享用户 sudo。
-- 每一步可重复执行，失败时给出回滚命令。
+- OpenSSH 首次安装期间不会先以默认配置运行；安全配置验证成功后才启用服务。
+- 保留本地控制台，直到管理员客户端第一次密钥登录成功。
+- 不配置路由器端口映射；SSH 认证只允许来自 Tailscale 地址段。
+- root、密码和键盘交互登录均关闭，只接受 Ed25519 公钥。
+- 每一步可重复执行，失败时保留备份并给出回滚命令。
+
+## 管理员权限边界
+
+`codex-admin` 拥有 `NOPASSWD: ALL`，等同于完整 root 管理权限。这是让 Codex 能安装计算环境、管理服务和处理故障的明确设计，不应分配给普通计算用户。
+
+- 管理员私钥只保存在受控客户端，不进入本仓库和目标服务器。
+- Linux 目标机只接收 `.pub` 公钥。
+- 普通多人账号后续单独创建，默认不授予 `sudo` 或 `docker` 组。
+- `docker` 组本身近似 root 权限，只给 `codex-admin` 等受信管理员。
+- Tailscale Tailnet 账号应启用多因素认证，并及时移除不再使用的设备。
+
+本项目使用“传统 OpenSSH + Tailscale 网络层”，不启用 Tailscale SSH。这样仍由 `authorized_keys` 明确决定哪一把客户端密钥可以登录。
+
+## 回滚
+
+安装器每次执行会输出备份目录。使用同一脚本回滚：
+
+```bash
+sudo python3 bootstrap_workstation.py --rollback /var/backups/connetlinux/时间戳
+```
+
+回滚会恢复脚本管理的 SSH drop-in、sudoers、`authorized_keys`、UFW 规则和休眠状态。为避免误删数据，它不会卸载软件，也不会自动删除 `codex-admin` 的主目录；该账号仍没有可用密码。
 
 ## 漏洞报告
 

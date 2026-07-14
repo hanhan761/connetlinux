@@ -23,8 +23,8 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Compile collector
-        run: python -m py_compile collect_linux_info.py
+      - name: Compile Python tools
+        run: python -m py_compile collect_linux_info.py bootstrap_workstation.py
 
       - name: Run unit tests
         run: python -m unittest discover -s tests -v
@@ -43,3 +43,26 @@ jobs:
           assert report["privacy"]["contains_private_keys"] is False
           assert report["privacy"]["contains_tokens_or_passwords"] is False
           PY
+
+      - name: Check bootstrap CLI
+        run: python bootstrap_workstation.py --help
+
+      - name: Validate generated OpenSSH configuration
+        if: matrix.python-version == '3.11'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends openssh-server
+          python - <<'PY' > /tmp/00-connetlinux.conf
+          import bootstrap_workstation
+
+          print(bootstrap_workstation.render_sshd_config("codex-admin"), end="")
+          PY
+          sudo install -m 0644 /tmp/00-connetlinux.conf /etc/ssh/sshd_config.d/00-connetlinux.conf
+          sudo mkdir -p /run/sshd
+          sudo /usr/sbin/sshd -t
+          sudo /usr/sbin/sshd -T -C user=codex-admin,host=workstation,addr=100.64.0.1 > /tmp/sshd-effective
+          grep -Fx 'permitrootlogin no' /tmp/sshd-effective
+          grep -Fx 'passwordauthentication no' /tmp/sshd-effective
+          grep -Fx 'kbdinteractiveauthentication no' /tmp/sshd-effective
+          grep -Fx 'authenticationmethods publickey' /tmp/sshd-effective
+          grep -F 'codex-admin@100.64.0.0/10' /tmp/sshd-effective
