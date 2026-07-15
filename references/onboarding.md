@@ -9,6 +9,9 @@ hosts.
 
 Ordinary control needs only Python 3 and OpenSSH on the controller and reachable
 sshd on Linux. Do not require Tailscale, a cloud SDK, MCP, or `~/.ssh/config`.
+Windows 10/11 controllers are supported when `python`, `ssh`, and `ssh-keygen`
+are available in PowerShell. Their registry defaults to
+`%LOCALAPPDATA%\yun\targets.json`; Linux/macOS uses `~/.config/yun/targets.json`.
 
 Initialize the external registry for first-time server onboarding:
 
@@ -28,6 +31,10 @@ This creates exactly:
 ~/.ssh/yun_TARGET_NAME.pem      # RSA-4096 private key in PEM encoding
 ~/.ssh/yun_TARGET_NAME.pem.pub  # public half installed on the server
 ```
+
+On Windows, `~` is the current user's profile directory, so these resolve under
+`%USERPROFILE%\.ssh`. The tool applies a private Windows ACL with `icacls` to
+the `.pem`; it does not rely on POSIX mode bits.
 
 The PEM is intentionally unencrypted so an authorized agent can use it without
 a password prompt, SSH agent, or secret-manager dependency. The tool applies

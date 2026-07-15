@@ -55,6 +55,25 @@ def synthetic_host_material(host: str = "host.example.invalid") -> tuple[str, st
 
 
 class RegistryTests(unittest.TestCase):
+    def test_default_registry_path_uses_platform_conventions(self) -> None:
+        home = Path("/home/yun-user")
+        self.assertEqual(
+            MODULE.default_registry_path(platform_name="posix", home=home),
+            home / ".config" / "yun" / "targets.json",
+        )
+        self.assertEqual(
+            MODULE.default_registry_path(
+                platform_name="nt",
+                local_app_data=r"C:\Users\yun-user\AppData\Local",
+                home=home,
+            ),
+            Path(r"C:\Users\yun-user\AppData\Local") / "yun" / "targets.json",
+        )
+        self.assertEqual(
+            MODULE.default_registry_path(platform_name="nt", local_app_data="", home=home),
+            home / "AppData" / "Local" / "yun" / "targets.json",
+        )
+
     def test_registry_refuses_skill_internal_runtime_state(self) -> None:
         internal = MODULE.SKILL_ROOT / "targets.json"
         with mock.patch.dict(os.environ, {MODULE.REGISTRY_ENV: str(internal)}):

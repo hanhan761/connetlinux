@@ -21,7 +21,6 @@ from typing import Any, Sequence
 
 SKILL_ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUNNER_PATH = pathlib.Path(__file__).with_name("yun_job_runner.sh")
-DEFAULT_REGISTRY_PATH = pathlib.Path.home() / ".config" / "yun" / "targets.json"
 REGISTRY_ENV = "YUN_TARGETS_FILE"
 JOB_ROOT = ".yun/jobs"
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -67,6 +66,28 @@ ALLOWED_TARGET_KEYS = {
 
 class YunError(RuntimeError):
     pass
+
+
+def default_registry_path(
+    *,
+    platform_name: str | None = None,
+    local_app_data: str | None = None,
+    home: pathlib.Path | None = None,
+) -> pathlib.Path:
+    """Return the platform-appropriate location for user-local runtime state."""
+    platform_name = os.name if platform_name is None else platform_name
+    home = pathlib.Path.home() if home is None else home
+    if platform_name == "nt":
+        local_app_data = (
+            os.environ.get("LOCALAPPDATA") if local_app_data is None else local_app_data
+        )
+        if local_app_data:
+            return pathlib.Path(local_app_data) / "yun" / "targets.json"
+        return home / "AppData" / "Local" / "yun" / "targets.json"
+    return home / ".config" / "yun" / "targets.json"
+
+
+DEFAULT_REGISTRY_PATH = default_registry_path()
 
 
 def printable(argv: Sequence[str]) -> str:

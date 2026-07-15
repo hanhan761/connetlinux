@@ -13,6 +13,22 @@
 
 不需要携带原电脑的注册表、`known_hosts`、`.pub`、SSH config、SSH agent、MCP 或云厂商 SDK。`import-pem` 会从 PEM 重建注册表和严格 host-key cache；服务器端必须已经安装对应公钥，控制端仍需 Python 3、OpenSSH 和到服务器的网络可达性。
 
+## Windows 控制端
+
+Windows 10/11 可以作为控制端；被管理目标仍是 Linux。请在 PowerShell 中确认
+Python 3、Windows OpenSSH Client 的 `ssh` 和 `ssh-keygen` 都在 `PATH`：
+
+```powershell
+Get-Command python, ssh, ssh-keygen
+python scripts/yunctl.py --help
+```
+
+默认私钥仍位于 `%USERPROFILE%\.ssh`。运行时注册表在
+`%LOCALAPPDATA%\yun\targets.json`（没有 `LOCALAPPDATA` 时回退到
+`%USERPROFILE%\AppData\Local\yun\targets.json`），而 Linux/macOS 继续使用
+`~/.config/yun/targets.json`。工具会以 `icacls` 收紧私钥和注册表 ACL；不要把
+PEM 放在同步盘、共享目录或版本库中。
+
 ## 换一台电脑
 
 安装 Skill，把 PEM 放在安全位置，然后执行：
@@ -21,6 +37,9 @@
 python scripts/yunctl.py import-pem /absolute/path/yun_workstation.pem
 python scripts/yunctl.py probe workstation
 ```
+
+在 PowerShell 中请传入 Windows 绝对路径，例如
+`$HOME\.ssh\yun_workstation.pem`；其余命令不变。
 
 导入会完成以下检查：
 
