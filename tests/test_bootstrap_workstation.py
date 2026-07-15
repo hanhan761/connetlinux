@@ -61,6 +61,23 @@ class BootstrapValidationTests(unittest.TestCase):
         self.assertIn("codex-admin@fd7a:115c:a1e0::/48", rendered)
         self.assertNotIn("PasswordAuthentication yes", rendered)
 
+    def test_effective_allowusers_accepts_repeated_tailscale_only_lines(self) -> None:
+        effective = (
+            "allowusers codex-admin@100.64.0.0/10\n"
+            "allowusers codex-admin@fd7a:115c:a1e0::/48\n"
+        )
+
+        self.assertTrue(
+            MODULE.effective_allowusers_are_tailscale_only(
+                effective, "codex-admin"
+            )
+        )
+        self.assertFalse(
+            MODULE.effective_allowusers_are_tailscale_only(
+                effective + "allowusers codex-admin\n", "codex-admin"
+            )
+        )
+
     def test_supported_os_accepts_ubuntu_and_rejects_unrelated_distros(self) -> None:
         MODULE.require_supported_os({"ID": "ubuntu", "ID_LIKE": "debian"})
 

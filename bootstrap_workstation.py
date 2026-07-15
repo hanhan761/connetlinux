@@ -201,6 +201,22 @@ def render_sudoers(admin_user: str) -> str:
     return f"{username} ALL=(ALL:ALL) NOPASSWD: ALL\n"
 
 
+def effective_allowusers_are_tailscale_only(
+    effective_config: str, admin_user: str
+) -> bool:
+    username = validate_admin_user(admin_user)
+    actual = set()
+    for raw_line in effective_config.lower().splitlines():
+        parts = raw_line.split(None, 1)
+        if len(parts) == 2 and parts[0] == "allowusers":
+            actual.add(parts[1])
+    expected = {
+        f"{username}@100.64.0.0/10",
+        f"{username}@fd7a:115c:a1e0::/48",
+    }
+    return actual == expected
+
+
 def ensure_root() -> None:
     if os.geteuid() != 0:
         raise BootstrapError("--apply and --rollback must be run with sudo")
@@ -678,13 +694,8 @@ class WorkstationInstaller:
                 raise BootstrapError(
                     "effective sshd configuration is not secure: " + ", ".join(missing)
                 )
-            allow_line = next(
-                (line for line in effective.splitlines() if line.startswith("allowusers ")),
-                "",
-            )
-            if (
-                f"{self.admin_user}@100.64.0.0/10" not in allow_line
-                or f"{self.admin_user}@fd7a:115c:a1e0::/48" not in allow_line
+            if not effective_allowusers_are_tailscale_only(
+                effective, self.admin_user
             ):
                 raise BootstrapError("effective sshd AllowUsers is not Tailscale-only")
             assert self.backup_dir is not None
