@@ -1,6 +1,6 @@
 ---
 name: yun
-description: Connect and operate authorized Linux SSH servers, onboard new targets with per-server keys and pinned host identity, transfer bounded files, and submit, monitor, cancel, fetch, or clean durable remote compute jobs. Use when the user invokes /yun or $yun, wants another agent to control a Linux server through SSH, needs a PEM/key onboarding path, or asks to run computation on a registered host.
+description: Connect and operate authorized Linux SSH servers with one dedicated RSA PEM per target, onboard and pin host identity, transfer bounded files, and submit, monitor, cancel, fetch, or clean durable remote compute jobs. Use when the user invokes /yun or $yun, wants another agent to control a Linux server without cloud/VPN/SSH-config coupling, needs to generate a PEM, or asks to run computation on a registered host.
 ---
 
 # 云
@@ -27,7 +27,8 @@ server fingerprint cannot be verified through an authorized channel.
 
 Read [references/onboarding.md](references/onboarding.md), then generate a
 unique client key locally, install only its `.pub` half, verify and pin the
-server's host key out of band, create a strict SSH alias, and run `register`.
+server's host key out of band, and run `register` with the absolute PEM and
+known-hosts paths.
 
 Complete onboarding only after strict non-interactive login and the registered
 `probe` both pass. A generated `.pem` file alone is not a connection.
@@ -77,5 +78,11 @@ python scripts/yunctl.py --help
 ```
 
 The CLI accepts only targets in the user-local registry, verifies the effective
-SSH hostname, user, strict checking, identity selection, and pinned host-key
-fingerprint before network use, and never embeds credential material.
+hostname, port, user, exact PEM, dedicated known-hosts file, and pinned host-key
+fingerprint before network use. It disables SSH config and ambient agents on
+every command and never embeds credential material.
+
+Ordinary server control requires only Python 3, the system OpenSSH client, a
+reachable Linux sshd, and the registered PEM/known-host data. Tailscale, cloud
+SDKs, MCP, and user SSH config are not required. The optional compute branch
+also requires remote Bash, tmux, and setsid.

@@ -5,6 +5,7 @@ import argparse
 import base64
 import datetime as dt
 import hashlib
+import ipaddress
 import json
 import os
 import pathlib
@@ -25,14 +26,16 @@ JOB_ROOT = ".yun/jobs"
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 TARGET_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 HOST_FINGERPRINT_PATTERN = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
-SINGLE_TOKEN_PATTERN = re.compile(r"^[^\s\x00-\x1f]+$")
-SSH_ALIAS_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
+HOST_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+SSH_USER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 ALLOWED_ROLES = {"server", "compute"}
 ALLOWED_TARGET_KEYS = {
     "description",
-    "ssh_alias",
-    "expected_hostname",
-    "expected_user",
+    "hostname",
+    "port",
+    "user",
+    "identity_file",
+    "known_hosts_file",
     "expected_host_key_sha256",
     "roles",
     "protected",
@@ -93,6 +96,20 @@ def validate_target_name(name: str) -> str:
     return name
 
 
+def validate_hostname(value: str) -> str:
+    if not value or len(value) > 253 or any(ord(character) < 33 for character in value):
+        raise YunError("hostname must be a DNS name or IP address without whitespace")
+    try:
+        ipaddress.ip_address(value)
+        return value
+    except ValueError:
+        dns_name = value[:-1] if value.endswith(".") else value
+        labels = dns_name.split(".")
+        if not labels or any(not HOST_LABEL_PATTERN.fullmatch(label) for label in labels):
+            raise YunError("hostname must be a DNS name or IP address")
+        return value
+
+
 def validate_target(name: str, target: Any) -> dict[str, Any]:
     validate_target_name(name)
     if not isinstance(target, dict):
@@ -103,9 +120,10 @@ def validate_target(name: str, target: Any) -> dict[str, Any]:
 
     required_strings = (
         "description",
-        "ssh_alias",
-        "expected_hostname",
-        "expected_user",
+        "hostname",
+        "user",
+        "identity_file",
+        "known_hosts_file",
         "expected_host_key_sha256",
     )
     for field in required_strings:
@@ -115,12 +133,25 @@ def validate_target(name: str, target: Any) -> dict[str, Any]:
     description = str(target["description"])
     if len(description) > 200 or any(character in description for character in "\r\n\x00"):
         raise YunError(f"target {name!r} has invalid description")
-    for field in ("ssh_alias", "expected_hostname", "expected_user"):
-        value = str(target[field])
-        if value.startswith("-") or not SINGLE_TOKEN_PATTERN.fullmatch(value):
-            raise YunError(f"target {name!r} has invalid {field}")
-    if not SSH_ALIAS_PATTERN.fullmatch(str(target["ssh_alias"])):
-        raise YunError(f"target {name!r} has invalid ssh_alias")
+    try:
+        validate_hostname(str(target["hostname"]))
+    except YunError as exc:
+        raise YunError(f"target {name!r} has invalid hostname: {exc}") from exc
+    if not SSH_USER_PATTERN.fullmatch(str(target["user"])):
+        raise YunError(f"target {name!r} has invalid user")
+    port = target.get("port")
+    if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
+        raise YunError(f"target {name!r} has invalid port")
+    identity_value = str(target["identity_file"])
+    known_hosts_value = str(target["known_hosts_file"])
+    if any(ord(character) < 32 for character in identity_value + known_hosts_value):
+        raise YunError(f"target {name!r} has a control character in a local path")
+    identity_file = pathlib.Path(identity_value).expanduser()
+    known_hosts_file = pathlib.Path(known_hosts_value).expanduser()
+    if not identity_file.is_absolute() or identity_file.suffix.lower() != ".pem":
+        raise YunError(f"target {name!r} identity_file must be an absolute .pem path")
+    if not known_hosts_file.is_absolute():
+        raise YunError(f"target {name!r} known_hosts_file must be an absolute path")
     if not HOST_FINGERPRINT_PATTERN.fullmatch(str(target["expected_host_key_sha256"])):
         raise YunError(f"target {name!r} has invalid SHA-256 host fingerprint")
     if not isinstance(target.get("protected"), bool):
@@ -147,8 +178,17 @@ def validate_registry(payload: Any) -> dict[str, Any]:
         raise YunError("registry must contain only schema_version and targets")
     if payload.get("schema_version") != 1 or not isinstance(payload.get("targets"), dict):
         raise YunError("invalid targets registry schema")
+    identity_owners: dict[str, str] = {}
     for name, target in payload["targets"].items():
         validate_target(name, target)
+        identity_path = pathlib.Path(str(target["identity_file"])).expanduser().resolve()
+        identity_key = os.path.normcase(str(identity_path))
+        existing_owner = identity_owners.get(identity_key)
+        if existing_owner is not None:
+            raise YunError(
+                f"targets {existing_owner!r} and {name!r} cannot share one PEM identity"
+            )
+        identity_owners[identity_key] = name
     return payload
 
 
@@ -208,30 +248,6 @@ def get_target(name: str) -> dict[str, Any]:
     return validate_target(name, target)
 
 
-def effective_ssh_config(alias: str) -> dict[str, str]:
-    result = run_external(["ssh", "-G", alias], capture=True)
-    if result.returncode != 0:
-        raise YunError(result.stderr.strip() or f"ssh -G failed for {alias}")
-    config: dict[str, str] = {}
-    for raw_line in result.stdout.splitlines():
-        parts = raw_line.split(None, 1)
-        if len(parts) == 2 and parts[0].lower() not in config:
-            config[parts[0].lower()] = parts[1].strip()
-    return config
-
-
-def known_hosts_paths(value: str) -> list[pathlib.Path]:
-    try:
-        words = shlex.split(value, posix=os.name != "nt")
-    except ValueError as exc:
-        raise YunError("invalid UserKnownHostsFile value in effective SSH config") from exc
-    paths: list[pathlib.Path] = []
-    for word in words:
-        unquoted = word.strip('"').replace("%d", str(pathlib.Path.home()))
-        paths.append(pathlib.Path(unquoted).expanduser())
-    return paths
-
-
 def fingerprints_from_known_hosts(output: str) -> set[str]:
     fingerprints: set[str] = set()
     for raw_line in output.splitlines():
@@ -251,49 +267,45 @@ def fingerprints_from_known_hosts(output: str) -> set[str]:
     return fingerprints
 
 
-def pinned_host_fingerprints(config: dict[str, str]) -> set[str]:
-    configured_alias = config.get("hostkeyalias", "").strip()
-    hostname = config.get("hostname", "").strip()
-    if configured_alias and configured_alias.lower() != "none":
-        lookup = configured_alias
-    else:
-        port = config.get("port", "22")
-        lookup = hostname if port == "22" else f"[{hostname}]:{port}"
-    path_value = config.get("userknownhostsfile", "")
-    if not lookup or not path_value:
-        raise YunError("effective SSH config lacks host lookup or UserKnownHostsFile")
+def resolved_connection_files(
+    target: dict[str, Any], *, require_exists: bool
+) -> tuple[pathlib.Path, pathlib.Path]:
+    identity = pathlib.Path(str(target["identity_file"])).expanduser().resolve()
+    known_hosts = pathlib.Path(str(target["known_hosts_file"])).expanduser().resolve()
+    for label, path in (("identity PEM", identity), ("known-hosts file", known_hosts)):
+        try:
+            path.relative_to(SKILL_ROOT)
+        except ValueError:
+            pass
+        else:
+            raise YunError(f"{label} must remain outside the installed skill directory")
+        if require_exists and not path.is_file():
+            raise YunError(f"{label} is missing: {path}")
+    return identity, known_hosts
 
-    fingerprints: set[str] = set()
-    for path in known_hosts_paths(path_value):
-        if not path.is_file():
-            continue
-        result = run_external(
-            ["ssh-keygen", "-F", lookup, "-f", str(path)], capture=True
-        )
-        if result.returncode not in (0, 1):
-            raise YunError(result.stderr.strip() or f"known-host lookup failed: {path}")
-        fingerprints.update(fingerprints_from_known_hosts(result.stdout))
-    return fingerprints
+
+def host_lookup(target: dict[str, Any]) -> str:
+    hostname = str(target["hostname"])
+    port = int(target["port"])
+    return hostname if port == 22 else f"[{hostname}]:{port}"
+
+
+def pinned_host_fingerprints(target: dict[str, Any]) -> set[str]:
+    _, known_hosts = resolved_connection_files(target, require_exists=True)
+    result = run_external(
+        ["ssh-keygen", "-F", host_lookup(target), "-f", str(known_hosts)],
+        capture=True,
+    )
+    if result.returncode not in (0, 1):
+        raise YunError(result.stderr.strip() or f"known-host lookup failed: {known_hosts}")
+    return fingerprints_from_known_hosts(result.stdout)
 
 
 def verify_target_payload(name: str, target: dict[str, Any]) -> dict[str, Any]:
     validate_target(name, target)
-    alias = str(target["ssh_alias"])
-    config = effective_ssh_config(alias)
-    expected_hostname = str(target["expected_hostname"]).lower().rstrip(".")
-    actual_hostname = config.get("hostname", "").lower().rstrip(".")
-    if actual_hostname != expected_hostname:
-        raise YunError(
-            f"SSH hostname mismatch for {name}: {actual_hostname!r} != {expected_hostname!r}"
-        )
-    if config.get("user", "") != str(target["expected_user"]):
-        raise YunError(f"SSH user mismatch for {name}")
-    if config.get("stricthostkeychecking", "").lower() not in {"yes", "true"}:
-        raise YunError(f"StrictHostKeyChecking must be yes/true for {name}")
-    if config.get("identitiesonly", "").lower() not in {"yes", "true"}:
-        raise YunError(f"IdentitiesOnly must be yes/true for {name}")
+    resolved_connection_files(target, require_exists=True)
     expected_fingerprint = str(target["expected_host_key_sha256"])
-    if expected_fingerprint not in pinned_host_fingerprints(config):
+    if expected_fingerprint not in pinned_host_fingerprints(target):
         raise YunError(f"pinned host-key fingerprint mismatch for {name}")
     return target
 
@@ -314,6 +326,56 @@ def require_protected_confirmation(
         raise YunError(f"protected target requires --confirm-target {name}")
 
 
+def connection_options(target: dict[str, Any]) -> list[str]:
+    identity, known_hosts = resolved_connection_files(target, require_exists=True)
+    return [
+        "-F",
+        "none",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "IdentityAgent=none",
+        "-o",
+        "PreferredAuthentications=publickey",
+        "-o",
+        "PasswordAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts}",
+        "-o",
+        "GlobalKnownHostsFile=none",
+        "-o",
+        "UpdateHostKeys=no",
+        "-o",
+        "ConnectTimeout=10",
+        "-o",
+        "ServerAliveInterval=30",
+        "-o",
+        "ServerAliveCountMax=3",
+        "-i",
+        str(identity),
+    ]
+
+
+def destination(target: dict[str, Any], *, scp: bool = False) -> str:
+    hostname = str(target["hostname"])
+    if scp and ":" in hostname and not hostname.startswith("["):
+        hostname = f"[{hostname}]"
+    return f"{target['user']}@{hostname}"
+
+
+def scp_argv(target: dict[str, Any], *, recursive: bool = False) -> list[str]:
+    argv = ["scp", *connection_options(target), "-P", str(target["port"])]
+    if recursive:
+        argv.append("-r")
+    return argv
+
+
 def ssh_run(
     target: dict[str, Any],
     remote_command: str,
@@ -321,12 +383,19 @@ def ssh_run(
     capture: bool = False,
     dry_run: bool = False,
 ) -> subprocess.CompletedProcess[str]:
-    alias = str(target["ssh_alias"])
+    remote = destination(target)
     return run_external(
-        ["ssh", "-o", "BatchMode=yes", alias, remote_command],
+        [
+            "ssh",
+            *connection_options(target),
+            "-p",
+            str(target["port"]),
+            remote,
+            remote_command,
+        ],
         capture=capture,
         dry_run=dry_run,
-        display=f"ssh {alias} <remote-command>",
+        display=f"ssh {remote}:{target['port']} <remote-command>",
     )
 
 
@@ -399,7 +468,8 @@ def cmd_targets(args: argparse.Namespace) -> int:
         roles = ",".join(target["roles"])
         protection = "protected" if target["protected"] else "standard"
         print(
-            f"{name}\t{target['ssh_alias']}\t{roles}\t{protection}\t"
+            f"{name}\t{target['user']}@{target['hostname']}:{target['port']}\t"
+            f"{roles}\t{protection}\t"
             f"{target['description']}"
         )
     return 0
@@ -409,11 +479,19 @@ def cmd_register(args: argparse.Namespace) -> int:
     payload = load_registry_payload()
     name = validate_target_name(args.name)
     roles = list(dict.fromkeys(args.role))
+    identity_file = pathlib.Path(
+        args.pem or pathlib.Path.home() / ".ssh" / f"yun_{name}.pem"
+    ).expanduser().resolve()
+    known_hosts_file = pathlib.Path(
+        args.known_hosts or pathlib.Path.home() / ".ssh" / f"yun_{name}.known_hosts"
+    ).expanduser().resolve()
     target: dict[str, Any] = {
         "description": args.description or name,
-        "ssh_alias": args.ssh_alias,
-        "expected_hostname": args.hostname,
-        "expected_user": args.user,
+        "hostname": args.host,
+        "port": args.port,
+        "user": args.user,
+        "identity_file": str(identity_file),
+        "known_hosts_file": str(known_hosts_file),
         "expected_host_key_sha256": args.host_fingerprint,
         "roles": roles,
         "protected": bool(args.protected),
@@ -423,8 +501,9 @@ def cmd_register(args: argparse.Namespace) -> int:
     validate_target(name, target)
     if name in payload["targets"] and args.confirm_replace != name:
         raise YunError(f"replacing target requires --confirm-replace {name}")
-    verify_target_payload(name, target)
     payload["targets"][name] = target
+    validate_registry(payload)
+    verify_target_payload(name, target)
     write_registry(payload, dry_run=args.dry_run)
     print(f"registered={name}")
     print(f"registry={registry_path()}")
@@ -433,23 +512,24 @@ def cmd_register(args: argparse.Namespace) -> int:
 
 def cmd_keygen(args: argparse.Namespace) -> int:
     key_directory = pathlib.Path(args.directory).expanduser().resolve()
-    key_name = slug(args.name)
-    if args.format == "ed25519":
-        private_key = key_directory / f"yun_{key_name}_ed25519"
-        key_args = ["-t", "ed25519", "-a", "100"]
-    else:
-        private_key = key_directory / f"yun_{key_name}_rsa.pem"
-        key_args = ["-t", "rsa", "-b", "4096", "-m", "PEM"]
+    key_name = validate_target_name(args.name)
+    private_key = key_directory / f"yun_{key_name}.pem"
+    key_args = ["-t", "rsa", "-b", "4096", "-m", "PEM"]
     public_key = pathlib.Path(f"{private_key}.pub")
     if private_key.exists() or public_key.exists():
         raise YunError(f"refusing to overwrite existing key pair: {private_key}")
-    if args.automation_key and not args.confirm_unencrypted:
-        raise YunError("automation key requires --confirm-unencrypted")
-
     comment = f"yun:{key_name}:{dt.date.today().isoformat()}"
-    command = ["ssh-keygen", "-q", *key_args, "-f", str(private_key), "-C", comment]
-    if args.automation_key:
-        command.extend(["-N", ""])
+    command = [
+        "ssh-keygen",
+        "-q",
+        *key_args,
+        "-f",
+        str(private_key),
+        "-C",
+        comment,
+        "-N",
+        "",
+    ]
     if args.dry_run:
         run_external(command, dry_run=True)
         print(f"private_key={private_key}")
@@ -521,9 +601,10 @@ def cmd_upload(args: argparse.Namespace) -> int:
     if not local.is_file():
         raise YunError(f"local upload file is missing: {local}")
     remote = valid_remote_path(args.remote)
-    alias = str(target["ssh_alias"])
     return run_external(
-        ["scp", str(local), f"{alias}:{remote}"], dry_run=args.dry_run
+        [*scp_argv(target), str(local), f"{destination(target, scp=True)}:{remote}"],
+        dry_run=args.dry_run,
+        display=f"scp <local-file> {destination(target, scp=True)}:<remote-path>",
     ).returncode
 
 
@@ -531,12 +612,17 @@ def cmd_download(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "server")
     remote = valid_remote_path(args.remote)
-    destination = pathlib.Path(args.local).expanduser().resolve()
+    local_destination = pathlib.Path(args.local).expanduser().resolve()
     if not args.dry_run:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-    alias = str(target["ssh_alias"])
+        local_destination.parent.mkdir(parents=True, exist_ok=True)
     return run_external(
-        ["scp", f"{alias}:{remote}", str(destination)], dry_run=args.dry_run
+        [
+            *scp_argv(target),
+            f"{destination(target, scp=True)}:{remote}",
+            str(local_destination),
+        ],
+        dry_run=args.dry_run,
+        display=f"scp {destination(target, scp=True)}:<remote-path> <local-file>",
     ).returncode
 
 
@@ -566,11 +652,15 @@ mkdir -p "$root/results"
     if result.returncode != 0:
         return result.returncode
 
-    alias = str(target["ssh_alias"])
     for source, name in ((script, "job.sh"), (RUNNER_PATH, "runner.sh")):
         result = run_external(
-            ["scp", str(source), f"{alias}:{scp_path}/{name}"],
+            [
+                *scp_argv(target),
+                str(source),
+                f"{destination(target, scp=True)}:{scp_path}/{name}",
+            ],
             dry_run=args.dry_run,
+            display=f"scp <job-file> {destination(target, scp=True)}:<job-path>",
         )
         if result.returncode != 0:
             return result.returncode
@@ -688,13 +778,17 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     )
     if check.returncode != 0:
         return check.returncode
-    destination = pathlib.Path(args.destination).expanduser().resolve() / args.job_id
+    local_destination = pathlib.Path(args.destination).expanduser().resolve() / args.job_id
     if not args.dry_run:
-        destination.parent.mkdir(parents=True, exist_ok=True)
-    alias = str(target["ssh_alias"])
+        local_destination.parent.mkdir(parents=True, exist_ok=True)
     return run_external(
-        ["scp", "-r", f"{alias}:{scp_path}/results", str(destination)],
+        [
+            *scp_argv(target, recursive=True),
+            f"{destination(target, scp=True)}:{scp_path}/results",
+            str(local_destination),
+        ],
         dry_run=args.dry_run,
+        display=f"scp -r {destination(target, scp=True)}:<results> <destination>",
     ).returncode
 
 
@@ -748,9 +842,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     register = subparsers.add_parser("register", help="validate and register one target")
     register.add_argument("name")
-    register.add_argument("--ssh-alias", required=True)
-    register.add_argument("--hostname", required=True)
+    register.add_argument("--host", required=True)
+    register.add_argument("--port", type=int, default=22)
     register.add_argument("--user", required=True)
+    register.add_argument("--pem")
+    register.add_argument("--known-hosts")
     register.add_argument("--host-fingerprint", required=True)
     register.add_argument(
         "--role", action="append", choices=sorted(ALLOWED_ROLES), required=True
@@ -763,9 +859,6 @@ def build_parser() -> argparse.ArgumentParser:
     keygen = subparsers.add_parser("keygen", help="generate a per-target SSH key pair")
     keygen.add_argument("name")
     keygen.add_argument("--directory", default=str(pathlib.Path.home() / ".ssh"))
-    keygen.add_argument("--format", choices=("ed25519", "rsa-pem"), default="ed25519")
-    keygen.add_argument("--automation-key", action="store_true")
-    keygen.add_argument("--confirm-unencrypted", action="store_true")
     keygen.set_defaults(func=cmd_keygen)
 
     probe = subparsers.add_parser("probe", help="run a read-only identity/readiness probe")

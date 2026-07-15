@@ -1,7 +1,8 @@
 # 远程计算闭环
 
-Use this branch only for a target registered with the `compute` role. The first
-public backend is detached `tmux`; do not claim Slurm/Kubernetes support.
+Use this branch only for a target registered with the `compute` role. It adds
+remote Bash, tmux, and setsid to the ordinary PEM/OpenSSH path. The first public
+backend is detached `tmux`; do not claim Slurm/Kubernetes support.
 
 ## Job contract
 

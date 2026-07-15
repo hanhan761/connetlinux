@@ -15,7 +15,7 @@ python scripts/yunctl.py exec TARGET --read-only -- hostname
 python scripts/yunctl.py exec TARGET --read-only -- systemctl is-active SERVICE
 ```
 
-An SSH config or host-fingerprint mismatch is an identity incident. Stop and
+A PEM/known-hosts/host-fingerprint mismatch is an identity incident. Stop and
 verify the change out of band; never weaken strict checking.
 
 ## Mutate
@@ -50,6 +50,6 @@ python scripts/yunctl.py download TARGET /remote/result.json ./downloads/result.
 Verify checksums before activation. Do not download or display private keys,
 populated environment files, cloud credentials, or secret-store exports.
 
-When the CLI lacks an operation, use the registered alias rather than rebuilding
-connection flags. Preserve every authority, identity, secret, and verification
-gate in `SKILL.md`.
+When the CLI lacks an operation, extend its direct connection path instead of
+falling back to ambient SSH config. Preserve every authority, identity, secret,
+and verification gate in `SKILL.md`.

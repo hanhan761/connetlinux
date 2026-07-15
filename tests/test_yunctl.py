@@ -22,15 +22,19 @@ SPEC.loader.exec_module(MODULE)
 
 
 FINGERPRINT = "SHA256:" + "A" * 43
+IDENTITY_FILE = str((Path(tempfile.gettempdir()) / "yun_worker-one.pem").resolve())
+KNOWN_HOSTS_FILE = str((Path(tempfile.gettempdir()) / "yun_worker-one.known_hosts").resolve())
 
 
 def target(*, protected: bool = False, roles: list[str] | None = None) -> dict:
     selected_roles = roles or ["server"]
     return {
         "description": "test target",
-        "ssh_alias": "test-alias",
-        "expected_hostname": "host.example.invalid",
-        "expected_user": "yun-admin",
+        "hostname": "host.example.invalid",
+        "port": 22,
+        "user": "yun-admin",
+        "identity_file": IDENTITY_FILE,
+        "known_hosts_file": KNOWN_HOSTS_FILE,
         "expected_host_key_sha256": FINGERPRINT,
         "roles": selected_roles,
         "protected": protected,
@@ -69,12 +73,14 @@ class RegistryTests(unittest.TestCase):
             args = [
                 "register",
                 "worker-one",
-                "--ssh-alias",
-                "test-alias",
-                "--hostname",
+                "--host",
                 "host.example.invalid",
                 "--user",
                 "yun-admin",
+                "--pem",
+                IDENTITY_FILE,
+                "--known-hosts",
+                KNOWN_HOSTS_FILE,
                 "--host-fingerprint",
                 FINGERPRINT,
                 "--role",
@@ -90,6 +96,8 @@ class RegistryTests(unittest.TestCase):
             self.assertEqual(saved["roles"], ["server", "compute"])
             self.assertEqual(saved["compute_backend"], "tmux")
             self.assertEqual(saved["job_root"], ".yun/jobs")
+            self.assertEqual(saved["identity_file"], IDENTITY_FILE)
+            self.assertNotIn("ssh_alias", saved)
 
     def test_register_refuses_unconfirmed_replacement(self) -> None:
         payload = {"schema_version": 1, "targets": {"worker-one": target()}}
@@ -98,9 +106,11 @@ class RegistryTests(unittest.TestCase):
             path.write_text(json.dumps(payload), encoding="utf-8")
             args = argparse.Namespace(
                 name="worker-one",
-                ssh_alias="test-alias",
-                hostname="host.example.invalid",
+                host="host.example.invalid",
+                port=22,
                 user="yun-admin",
+                pem=IDENTITY_FILE,
+                known_hosts=KNOWN_HOSTS_FILE,
                 host_fingerprint=FINGERPRINT,
                 role=["server"],
                 description=None,
@@ -120,12 +130,36 @@ class RegistryTests(unittest.TestCase):
                 {"schema_version": 1, "targets": {"worker-one": malformed}}
             )
 
-    def test_registry_rejects_ssh_alias_and_description_injection(self) -> None:
-        malformed_alias = target()
-        malformed_alias["ssh_alias"] = "user@host"
+    def test_registry_refuses_one_pem_shared_by_two_targets(self) -> None:
+        with self.assertRaisesRegex(MODULE.YunError, "cannot share one PEM"):
+            MODULE.validate_registry(
+                {
+                    "schema_version": 1,
+                    "targets": {
+                        "worker-one": target(),
+                        "worker-two": target(),
+                    },
+                }
+            )
+
+    def test_registry_rejects_connection_and_description_injection(self) -> None:
+        malformed_hosts = []
+        for value in ("-oProxyCommand=bad", "admin@host.example", "[::1]", "bad host"):
+            malformed = target()
+            malformed["hostname"] = value
+            malformed_hosts.append(malformed)
+        malformed_user = target()
+        malformed_user["user"] = "admin@host"
+        malformed_identity = target()
+        malformed_identity["identity_file"] = str(Path(tempfile.gettempdir()) / "not-pem.key")
         malformed_description = target()
         malformed_description["description"] = "line one\nline two"
-        for malformed in (malformed_alias, malformed_description):
+        for malformed in (
+            *malformed_hosts,
+            malformed_user,
+            malformed_identity,
+            malformed_description,
+        ):
             with self.subTest(malformed=malformed), self.assertRaises(MODULE.YunError):
                 MODULE.validate_target("worker-one", malformed)
 
@@ -140,38 +174,31 @@ class IdentityTests(unittest.TestCase):
         output = f"# Host found\nexample.invalid ssh-ed25519 {encoded}\n"
         self.assertEqual(MODULE.fingerprints_from_known_hosts(output), {expected})
 
-    def test_verify_target_requires_exact_effective_identity_and_fingerprint(self) -> None:
-        config = {
-            "hostname": "host.example.invalid",
-            "user": "yun-admin",
-            "stricthostkeychecking": "true",
-            "identitiesonly": "true",
-        }
-        with mock.patch.object(MODULE, "effective_ssh_config", return_value=config), mock.patch.object(
+    def test_verify_target_requires_exact_registered_identity_and_fingerprint(self) -> None:
+        files = (Path(IDENTITY_FILE), Path(KNOWN_HOSTS_FILE))
+        with mock.patch.object(MODULE, "resolved_connection_files", return_value=files), mock.patch.object(
             MODULE, "pinned_host_fingerprints", return_value={FINGERPRINT}
         ):
             self.assertEqual(MODULE.verify_target_payload("worker-one", target()), target())
 
-        with mock.patch.object(MODULE, "effective_ssh_config", return_value=config), mock.patch.object(
+        with mock.patch.object(MODULE, "resolved_connection_files", return_value=files), mock.patch.object(
             MODULE, "pinned_host_fingerprints", return_value=set()
         ):
             with self.assertRaisesRegex(MODULE.YunError, "fingerprint mismatch"):
                 MODULE.verify_target_payload("worker-one", target())
 
-    def test_verify_target_rejects_non_strict_or_ambient_identity(self) -> None:
-        for field in ("stricthostkeychecking", "identitiesonly"):
-            config = {
-                "hostname": "host.example.invalid",
-                "user": "yun-admin",
-                "stricthostkeychecking": "true",
-                "identitiesonly": "true",
-            }
-            config[field] = "false"
-            with self.subTest(field=field), mock.patch.object(
-                MODULE, "effective_ssh_config", return_value=config
-            ):
-                with self.assertRaises(MODULE.YunError):
-                    MODULE.verify_target_payload("worker-one", target())
+    def test_connection_arguments_disable_ssh_config_and_pin_one_pem(self) -> None:
+        files = (Path(IDENTITY_FILE), Path(KNOWN_HOSTS_FILE))
+        with mock.patch.object(MODULE, "resolved_connection_files", return_value=files):
+            options = MODULE.connection_options(target())
+            ssh_target = MODULE.destination(target())
+        self.assertEqual(options[:2], ["-F", "none"])
+        self.assertIn("IdentitiesOnly=yes", options)
+        self.assertIn("IdentityAgent=none", options)
+        self.assertIn("StrictHostKeyChecking=yes", options)
+        self.assertIn(f"UserKnownHostsFile={KNOWN_HOSTS_FILE}", options)
+        self.assertEqual(options[options.index("-i") + 1], IDENTITY_FILE)
+        self.assertEqual(ssh_target, "yun-admin@host.example.invalid")
 
 
 class SafetyTests(unittest.TestCase):
@@ -203,17 +230,21 @@ class SafetyTests(unittest.TestCase):
         self.assertNotIn("synthetic-password-value", redacted)
         self.assertGreaterEqual(redacted.count("[REDACTED]"), 3)
 
-    def test_automation_key_requires_explicit_unencrypted_confirmation(self) -> None:
+    def test_keygen_dry_run_produces_one_rsa_pem_identity(self) -> None:
         args = argparse.Namespace(
             directory=tempfile.gettempdir(),
             name="worker-one",
-            format="ed25519",
-            automation_key=True,
-            confirm_unencrypted=False,
             dry_run=True,
         )
-        with self.assertRaisesRegex(MODULE.YunError, "--confirm-unencrypted"):
-            MODULE.cmd_keygen(args)
+        with mock.patch.object(MODULE, "run_external") as run:
+            run.return_value.returncode = 0
+            self.assertEqual(MODULE.cmd_keygen(args), 0)
+        command = run.call_args.args[0]
+        self.assertIn("rsa", command)
+        self.assertIn("4096", command)
+        self.assertIn("PEM", command)
+        self.assertEqual(command[command.index("-N") + 1], "")
+        self.assertIn(str(Path(tempfile.gettempdir()).resolve() / "yun_worker-one.pem"), command)
 
     def test_remote_paths_reject_option_and_control_injection(self) -> None:
         self.assertEqual(MODULE.valid_remote_path("/tmp/result.json"), "/tmp/result.json")

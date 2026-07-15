@@ -1,106 +1,93 @@
-# 新服务器接入与密钥
+# 新服务器接入：一台服务器一个 PEM
 
-## 1. Establish authority
+## 1. Establish authority and dependencies
 
-Obtain a unique target name, hostname/IP, SSH user, network scope, target roles,
-and an authorized bootstrap channel such as a provider console, serial/KVM,
-cloud-init, or an existing administrator account. Mark production or shared
-infrastructure as protected. Do not onboard a host discovered by scanning.
+Obtain a unique lowercase target name, host/IP, SSH port, SSH user, network
+reachability, roles, and an authorized bootstrap channel such as provider
+console, KVM, cloud-init, or an existing administrator account. Do not scan for
+hosts.
 
-Initialize the user-local registry once:
+Ordinary control needs only Python 3 and OpenSSH on the controller and reachable
+sshd on Linux. Do not require Tailscale, a cloud SDK, MCP, or `~/.ssh/config`.
+
+Initialize the external registry:
 
 ```text
 python scripts/yunctl.py init
 ```
 
-## 2. Generate one client key per trust boundary
-
-Generate the pair on the control computer, not on the server:
+## 2. Generate the target's only client identity
 
 ```text
 python scripts/yunctl.py keygen TARGET_NAME
-python scripts/yunctl.py keygen TARGET_NAME --automation-key --confirm-unencrypted
-python scripts/yunctl.py keygen TARGET_NAME --format rsa-pem
 ```
 
-Prefer interactive Ed25519. Use the explicitly confirmed unencrypted form only
-for non-interactive agents with a unique key, restrictive local permissions,
-strict host checking, and a constrained server account/network. Use RSA-4096 PEM
-only when a provider or legacy client requires it.
+This creates exactly:
 
-The private file stays on the controller; install only the `.pub` line on the
-server. A `.pem` suffix is an encoding/filename convention, not authorization.
-The command prints file paths and the public fingerprint, never key contents.
+```text
+~/.ssh/yun_TARGET_NAME.pem      # RSA-4096 private key in PEM encoding
+~/.ssh/yun_TARGET_NAME.pem.pub  # public half installed on the server
+```
+
+The PEM is intentionally unencrypted so an authorized agent can use it without
+a password prompt, SSH agent, or secret-manager dependency. The tool applies
+restrictive local permissions. Never overwrite or reuse a target's PEM, protect
+the controller account, keep the private `.pem` only on that controller, and
+install only `.pem.pub`. The tool prints paths and the public fingerprint,
+never private contents.
 
 ## 3. Install only the public half
 
-Through the authorized bootstrap channel, append the `.pub` line to the target
-account's `~/.ssh/authorized_keys`, then enforce:
+Through the authorized bootstrap channel, append the single `.pem.pub` line to
+the target account's `~/.ssh/authorized_keys`, then enforce:
 
 ```text
 ~/.ssh                 0700
 ~/.ssh/authorized_keys 0600
 ```
 
-Prefer a dedicated administration account. Disable password/root login where
-operationally safe and constrain exposure with Tailscale/VPN, firewall rules, or
-cloud security groups. Never upload the private key.
+Prefer a dedicated account. Disable password/root login where operationally
+safe and constrain public exposure with the user's chosen network controls.
 
-## 4. Verify the server identity out of band
+## 4. Pin the server identity out of band
 
-Obtain the ED25519 host fingerprint from the trusted server console:
+On the trusted server console, obtain the ED25519 host public key and
+fingerprint:
 
 ```text
+sudo cat /etc/ssh/ssh_host_ed25519_key.pub
 sudo ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub -E sha256
 ```
 
-Compare it through a separate trusted channel. Only after an exact match, add
-the corresponding host public key to a dedicated local known-hosts file. Do not
-trust `ssh-keyscan` by itself over the same network being authenticated.
+Verify the fingerprint through an independent trusted channel. Create a
+dedicated local file `~/.ssh/yun_TARGET_NAME.known_hosts` containing the verified
+host public key prefixed by `HOST` for port 22 or `[HOST]:PORT` otherwise. Do not
+trust `ssh-keyscan` alone over the same network being authenticated.
 
-## 5. Create a strict SSH alias
-
-Add a named block to `~/.ssh/config`:
-
-```text
-Host YUN_ALIAS
-  HostName VERIFIED_HOST
-  User VERIFIED_USER
-  IdentityFile ABSOLUTE_PRIVATE_KEY_PATH
-  IdentitiesOnly yes
-  UserKnownHostsFile DEDICATED_KNOWN_HOSTS_PATH
-  StrictHostKeyChecking yes
-  ConnectTimeout 10
-  ServerAliveInterval 30
-  ServerAliveCountMax 3
-```
-
-Test `ssh -G YUN_ALIAS` and `ssh -o BatchMode=yes YUN_ALIAS true`. Do not proceed
-through a host-key prompt or password fallback.
-
-## 6. Register and accept
-
-Register only secret-free metadata, using the exact trusted fingerprint:
+## 5. Register the direct connection
 
 ```text
 python scripts/yunctl.py register TARGET_NAME \
-  --ssh-alias YUN_ALIAS \
-  --hostname VERIFIED_HOST \
+  --host VERIFIED_HOST \
+  --port 22 \
   --user VERIFIED_USER \
+  --pem ABSOLUTE_PATH/yun_TARGET_NAME.pem \
+  --known-hosts ABSOLUTE_PATH/yun_TARGET_NAME.known_hosts \
   --host-fingerprint SHA256:VERIFIED_FINGERPRINT \
   --role server \
   --description "AUTHORIZED PURPOSE"
 ```
 
-Add `--role compute` only when detached tmux jobs are authorized, and
-`--protected` for production/shared targets. `register` refuses to save until
-the effective SSH alias and pinned known-hosts fingerprint match.
+Add `--role compute` only when remote Bash, tmux, and setsid jobs are authorized;
+add `--protected` for production/shared targets. `register` refuses a missing or
+non-PEM identity, missing known-hosts file, or fingerprint mismatch.
 
-Finish with:
+## 6. Accept
 
 ```text
 python scripts/yunctl.py probe TARGET_NAME
 ```
 
-For compute targets, also run one bounded success/fetch job and one disposable
-cancellation job before describing the target as controllable through `/yun`.
+The probe uses direct OpenSSH flags with `-F none`, the exact PEM, no SSH agent,
+strict checking, and only the dedicated known-hosts file. For compute targets,
+also complete one bounded success/fetch job and one disposable cancellation job.
