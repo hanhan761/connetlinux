@@ -1,4 +1,4 @@
-name: test
+name: validate-yun-skill
 
 on:
   push:
@@ -8,11 +8,11 @@ permissions:
   contents: read
 
 jobs:
-  collector:
+  validate:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        python-version: ["3.8", "3.11"]
+        python-version: ["3.11", "3.13"]
 
     steps:
       - name: Check out repository
@@ -23,46 +23,33 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
-      - name: Compile Python tools
-        run: python -m py_compile collect_linux_info.py bootstrap_workstation.py
-
-      - name: Run unit tests
-        run: python -m unittest discover -s tests -v
-
-      - name: Run Linux smoke collection
+      - name: Compile and test control plane
         run: |
-          python collect_linux_info.py --quiet --output /tmp/workstation-report.json
-          python - <<'PY'
-          import json
+          python -m py_compile scripts/yunctl.py
+          python -m unittest discover -s tests -v
+          python scripts/yunctl.py --help
+          bash -n scripts/yun_job_runner.sh
 
-          with open("/tmp/workstation-report.json", encoding="utf-8") as report_file:
-              report = json.load(report_file)
-
-          assert report["schema_version"] == "1.0"
-          assert report["system"]["platform"] == "Linux"
-          assert report["privacy"]["contains_private_keys"] is False
-          assert report["privacy"]["contains_tokens_or_passwords"] is False
-          PY
-
-      - name: Check bootstrap CLI
-        run: python bootstrap_workstation.py --help
-
-      - name: Validate generated OpenSSH configuration
-        if: matrix.python-version == '3.11'
+      - name: Test isolated registry lifecycle
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends openssh-server
-          python - <<'PY' > /tmp/00-connetlinux.conf
-          import bootstrap_workstation
+          registry_root=$(mktemp -d)
+          trap 'rm -rf -- "$registry_root"' EXIT
+          export YUN_TARGETS_FILE="$registry_root/targets.json"
+          python scripts/yunctl.py init
+          python scripts/yunctl.py init
+          test "$(python scripts/yunctl.py targets)" = "no targets registered"
+          test "$(stat -c %a "$YUN_TARGETS_FILE")" = "600"
 
-          print(bootstrap_workstation.render_sshd_config("codex-admin"), end="")
-          PY
-          sudo install -m 0644 /tmp/00-connetlinux.conf /etc/ssh/sshd_config.d/00-connetlinux.conf
-          sudo mkdir -p /run/sshd
-          sudo /usr/sbin/sshd -t
-          sudo /usr/sbin/sshd -T -C user=codex-admin,host=workstation,addr=100.64.0.1 > /tmp/sshd-effective
-          grep -Fx 'permitrootlogin no' /tmp/sshd-effective
-          grep -Fx 'passwordauthentication no' /tmp/sshd-effective
-          grep -Fx 'kbdinteractiveauthentication no' /tmp/sshd-effective
-          grep -Fx 'authenticationmethods publickey' /tmp/sshd-effective
-          grep -F 'codex-admin@100.64.0.0/10' /tmp/sshd-effective
+      - name: Test Ed25519 key lifecycle
+        if: matrix.python-version == '3.13'
+        run: |
+          key_root=$(mktemp -d)
+          trap 'rm -rf -- "$key_root"' EXIT
+          python scripts/yunctl.py keygen ci-worker \
+            --directory "$key_root" \
+            --automation-key \
+            --confirm-unencrypted
+          test -s "$key_root/yun_ci-worker_ed25519"
+          test -s "$key_root/yun_ci-worker_ed25519.pub"
+          test "$(stat -c %a "$key_root/yun_ci-worker_ed25519")" = "600"
+          ssh-keygen -lf "$key_root/yun_ci-worker_ed25519.pub" -E sha256

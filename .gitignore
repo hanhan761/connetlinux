@@ -1,22 +1,27 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+.ruff_cache/
 .venv/
 venv/
 
-# Real workstation reports contain private operational metadata.
-workstation-report*.json
-reports/
+# Local runtime state and task output.
+.yun/
+results/
 *.log
 
-# Never commit runtime credentials or SSH private keys.
+# Credentials and operational metadata never belong in this repository.
 .env
 .env.*
 !.env.example
 *.key
 *.pem
+*.pub
 id_rsa*
 id_ed25519*
+yun_*_ed25519
+targets.json
+known_hosts*
 secrets/
 local/
 

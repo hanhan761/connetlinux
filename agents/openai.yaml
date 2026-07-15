@@ -1,0 +1,6 @@
+interface:
+  display_name: "云"
+  short_description: "安全接入并控制 Linux SSH 服务器，提交和跟踪远程计算"
+  default_prompt: "使用 $yun 接入或连接一台已授权服务器，完成请求并验证结果。"
+policy:
+  allow_implicit_invocation: true
