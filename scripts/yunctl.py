@@ -11,6 +11,7 @@ import os
 import pathlib
 import re
 import secrets
+import shutil
 import shlex
 import subprocess
 import sys
@@ -28,6 +29,26 @@ TARGET_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$"
 HOST_FINGERPRINT_PATTERN = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 HOST_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 SSH_USER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
+BUNDLE_PREFIX = b"# YUN-BUNDLE-V1 "
+BUNDLE_SCHEMA_VERSION = 1
+BUNDLE_MAX_HEADER_BYTES = 8192
+MAX_PRIVATE_KEY_BYTES = 1024 * 1024
+BUNDLE_KEYS = {
+    "schema_version",
+    "name",
+    "connection",
+    "known_hosts_line",
+    "host_key_sha256",
+    "client_key_sha256",
+}
+BUNDLE_CONNECTION_KEYS = {
+    "description",
+    "hostname",
+    "port",
+    "user",
+    "roles",
+    "protected",
+}
 ALLOWED_ROLES = {"server", "compute"}
 ALLOWED_TARGET_KEYS = {
     "description",
@@ -199,6 +220,10 @@ def load_registry_payload() -> dict[str, Any]:
     return validate_registry(json.loads(path.read_text(encoding="utf-8")))
 
 
+def load_registry_or_empty() -> dict[str, Any]:
+    return load_registry_payload() if registry_path().is_file() else empty_registry()
+
+
 def load_registry() -> dict[str, dict[str, Any]]:
     return load_registry_payload()["targets"]
 
@@ -241,6 +266,23 @@ def write_registry(payload: dict[str, Any], *, dry_run: bool = False) -> None:
             temporary.unlink()
 
 
+def write_public_text(path: pathlib.Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handle, temporary_name = tempfile.mkstemp(prefix=f".{path.name}-", dir=path.parent)
+    temporary = pathlib.Path(temporary_name)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name != "nt":
+            temporary.chmod(0o644)
+        os.replace(temporary, path)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def get_target(name: str) -> dict[str, Any]:
     target = load_registry().get(name)
     if target is None:
@@ -265,6 +307,221 @@ def fingerprints_from_known_hosts(output: str) -> set[str]:
         digest = base64.b64encode(hashlib.sha256(key_bytes).digest()).decode("ascii")
         fingerprints.add("SHA256:" + digest.rstrip("="))
     return fingerprints
+
+
+def client_public_fingerprint(identity: pathlib.Path) -> str:
+    result = run_external(
+        ["ssh-keygen", "-y", "-f", str(identity)],
+        capture=True,
+        display=f"ssh-keygen -y -f {identity} <public-output-captured>",
+    )
+    if result.returncode != 0:
+        raise YunError(result.stderr.strip() or f"cannot read public identity: {identity}")
+    public_line = result.stdout.strip()
+    fields = public_line.split()
+    if len(fields) < 2 or fields[0] != "ssh-rsa" or "\n" in public_line:
+        raise YunError("identity PEM does not contain one RSA public key")
+    fingerprints = fingerprints_from_known_hosts(f"client {fields[0]} {fields[1]}\n")
+    if len(fingerprints) != 1:
+        raise YunError("cannot fingerprint identity PEM")
+    return next(iter(fingerprints))
+
+
+def bundle_cache_path(name: str) -> pathlib.Path:
+    validate_target_name(name)
+    path = (registry_path().parent / "known_hosts" / f"{name}.known_hosts").resolve()
+    try:
+        path.relative_to(SKILL_ROOT)
+    except ValueError:
+        return path
+    raise YunError("bundle cache must remain outside the installed skill directory")
+
+
+def encode_bundle_payload(payload: dict[str, Any]) -> bytes:
+    raw = json.dumps(
+        payload,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("ascii")
+    token = base64.urlsafe_b64encode(raw).rstrip(b"=")
+    header = BUNDLE_PREFIX + token + b"\n"
+    if len(header) > BUNDLE_MAX_HEADER_BYTES:
+        raise YunError("self-describing PEM metadata is too large")
+    return header
+
+
+def read_bundle_payload(identity: pathlib.Path) -> dict[str, Any]:
+    identity = identity.expanduser().resolve()
+    if not identity.is_file() or identity.suffix.lower() != ".pem":
+        raise YunError(f"self-describing PEM is missing: {identity}")
+    if identity.stat().st_size > MAX_PRIVATE_KEY_BYTES:
+        raise YunError("identity PEM exceeds the 1 MiB safety limit")
+    with identity.open("rb") as stream:
+        header = stream.readline(BUNDLE_MAX_HEADER_BYTES + 1)
+    if len(header) > BUNDLE_MAX_HEADER_BYTES:
+        raise YunError("self-describing PEM metadata header is too large")
+    if not header.startswith(BUNDLE_PREFIX):
+        raise YunError("PEM has no YUN-BUNDLE-V1 metadata; run bundle-pem first")
+    if not header.endswith(b"\n"):
+        raise YunError("self-describing PEM metadata header is truncated")
+    token = header[len(BUNDLE_PREFIX) :].strip()
+    if not token or re.fullmatch(rb"[A-Za-z0-9_-]+", token) is None:
+        raise YunError("self-describing PEM metadata encoding is invalid")
+    padding = b"=" * ((4 - len(token) % 4) % 4)
+    try:
+        decoded = base64.urlsafe_b64decode(token + padding)
+        payload = json.loads(decoded.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise YunError("self-describing PEM metadata cannot be decoded") from exc
+    if not isinstance(payload, dict):
+        raise YunError("self-describing PEM metadata must be an object")
+    if encode_bundle_payload(payload) != header:
+        raise YunError("self-describing PEM metadata is not canonical")
+    return payload
+
+
+def validate_bundle_payload(
+    payload: dict[str, Any], identity: pathlib.Path
+) -> tuple[str, dict[str, Any], str]:
+    if set(payload) != BUNDLE_KEYS or payload.get("schema_version") != BUNDLE_SCHEMA_VERSION:
+        raise YunError("unsupported or malformed self-describing PEM schema")
+    name = payload.get("name")
+    if not isinstance(name, str):
+        raise YunError("self-describing PEM requires a target name")
+    validate_target_name(name)
+    connection = payload.get("connection")
+    if not isinstance(connection, dict) or set(connection) != BUNDLE_CONNECTION_KEYS:
+        raise YunError("self-describing PEM has malformed connection metadata")
+    known_hosts_line = payload.get("known_hosts_line")
+    if (
+        not isinstance(known_hosts_line, str)
+        or not known_hosts_line
+        or len(known_hosts_line) > 4096
+        or any(character in known_hosts_line for character in "\r\n\x00")
+    ):
+        raise YunError("self-describing PEM has an invalid host-key line")
+    host_fingerprint = payload.get("host_key_sha256")
+    client_fingerprint = payload.get("client_key_sha256")
+    if not isinstance(host_fingerprint, str) or not HOST_FINGERPRINT_PATTERN.fullmatch(
+        host_fingerprint
+    ):
+        raise YunError("self-describing PEM has an invalid host fingerprint")
+    if not isinstance(client_fingerprint, str) or not HOST_FINGERPRINT_PATTERN.fullmatch(
+        client_fingerprint
+    ):
+        raise YunError("self-describing PEM has an invalid client fingerprint")
+
+    roles = connection.get("roles")
+    target: dict[str, Any] = {
+        "description": connection.get("description"),
+        "hostname": connection.get("hostname"),
+        "port": connection.get("port"),
+        "user": connection.get("user"),
+        "identity_file": str(identity.expanduser().resolve()),
+        "known_hosts_file": str(bundle_cache_path(name)),
+        "expected_host_key_sha256": host_fingerprint,
+        "roles": roles,
+        "protected": connection.get("protected"),
+        "compute_backend": "tmux" if isinstance(roles, list) and "compute" in roles else None,
+        "job_root": JOB_ROOT if isinstance(roles, list) and "compute" in roles else None,
+    }
+    validate_target(name, target)
+    resolved_connection_files(target, require_exists=False)
+    fields = known_hosts_line.split()
+    if (
+        len(fields) != 3
+        or fields[0] != host_lookup(target)
+        or fields[1] != "ssh-ed25519"
+        or fingerprints_from_known_hosts(known_hosts_line) != {host_fingerprint}
+    ):
+        raise YunError("embedded ED25519 host key does not match target and fingerprint")
+    return name, target, known_hosts_line
+
+
+def verified_host_key_line(target: dict[str, Any]) -> str:
+    _, known_hosts = resolved_connection_files(target, require_exists=True)
+    result = run_external(
+        ["ssh-keygen", "-F", host_lookup(target), "-f", str(known_hosts)],
+        capture=True,
+    )
+    if result.returncode not in (0, 1):
+        raise YunError(result.stderr.strip() or "known-host lookup failed")
+    expected = str(target["expected_host_key_sha256"])
+    matches: set[str] = set()
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        fields = line.split()
+        offset = 1 if fields and fields[0].startswith("@") else 0
+        if len(fields) < offset + 3 or fields[offset + 1] != "ssh-ed25519":
+            continue
+        normalized = f"{host_lookup(target)} ssh-ed25519 {fields[offset + 2]}"
+        if fingerprints_from_known_hosts(normalized) == {expected}:
+            matches.add(normalized)
+    if len(matches) != 1:
+        raise YunError("expected exactly one verified ED25519 host key for bundling")
+    return next(iter(matches))
+
+
+def build_bundle_payload(name: str, target: dict[str, Any]) -> dict[str, Any]:
+    identity, _ = resolved_connection_files(target, require_exists=True)
+    return {
+        "schema_version": BUNDLE_SCHEMA_VERSION,
+        "name": name,
+        "connection": {
+            "description": target["description"],
+            "hostname": target["hostname"],
+            "port": target["port"],
+            "user": target["user"],
+            "roles": target["roles"],
+            "protected": target["protected"],
+        },
+        "known_hosts_line": verified_host_key_line(target),
+        "host_key_sha256": target["expected_host_key_sha256"],
+        "client_key_sha256": client_public_fingerprint(identity),
+    }
+
+
+def write_bundled_identity(
+    identity: pathlib.Path, header: bytes, expected_fingerprint: str
+) -> None:
+    identity = identity.expanduser().resolve()
+    if identity.stat().st_size > MAX_PRIVATE_KEY_BYTES:
+        raise YunError("identity PEM exceeds the 1 MiB safety limit")
+    with identity.open("rb") as source:
+        first_line = source.readline(BUNDLE_MAX_HEADER_BYTES + 1)
+    if first_line.startswith(BUNDLE_PREFIX):
+        source_offset = len(first_line)
+    elif first_line in (
+        b"-----BEGIN RSA PRIVATE KEY-----\n",
+        b"-----BEGIN RSA PRIVATE KEY-----\r\n",
+    ):
+        source_offset = 0
+    else:
+        raise YunError("identity is not a supported RSA PEM or YUN-BUNDLE-V1 file")
+
+    handle, temporary_name = tempfile.mkstemp(
+        prefix=f".{identity.name}.bundle-", suffix=".pem", dir=identity.parent
+    )
+    os.close(handle)
+    temporary = pathlib.Path(temporary_name)
+    try:
+        restrict_local_file(temporary)
+        with identity.open("rb") as source, temporary.open("wb") as candidate:
+            source.seek(source_offset)
+            candidate.write(header)
+            shutil.copyfileobj(source, candidate, length=64 * 1024)
+            candidate.flush()
+            os.fsync(candidate.fileno())
+        if client_public_fingerprint(temporary) != expected_fingerprint:
+            raise YunError("bundled PEM candidate changed the client public identity")
+        os.replace(temporary, identity)
+        restrict_local_file(identity)
+    finally:
+        if temporary.exists():
+            temporary.unlink()
 
 
 def resolved_connection_files(
@@ -557,6 +814,103 @@ def cmd_keygen(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundle_pem(args: argparse.Namespace) -> int:
+    target = verify_target(args.target)
+    require_protected_confirmation(args.target, target, args.confirm_target)
+    identity, _ = resolved_connection_files(target, require_exists=True)
+    payload = build_bundle_payload(args.target, target)
+    validate_bundle_payload(payload, identity)
+    header = encode_bundle_payload(payload)
+
+    with identity.open("rb") as stream:
+        already_bundled = stream.readline(len(BUNDLE_PREFIX)).startswith(BUNDLE_PREFIX)
+    state = "created"
+    if already_bundled:
+        existing = read_bundle_payload(identity)
+        validate_bundle_payload(existing, identity)
+        if existing == payload:
+            print(f"bundled={args.target}")
+            print("state=existing")
+            return 0
+        if args.confirm_rebind != args.target:
+            raise YunError(f"rebinding PEM metadata requires --confirm-rebind {args.target}")
+        state = "rebound"
+
+    if args.dry_run:
+        print(f"would_bundle={args.target}")
+        print(f"identity_file={identity}")
+        print(f"state=would-{state}")
+        return 0
+    write_bundled_identity(identity, header, str(payload["client_key_sha256"]))
+    validated = read_bundle_payload(identity)
+    validate_bundle_payload(validated, identity)
+    print(f"bundled={args.target}")
+    print(f"identity_file={identity}")
+    print(f"state={state}")
+    return 0
+
+
+def cmd_import_pem(args: argparse.Namespace) -> int:
+    identity = pathlib.Path(args.pem).expanduser().resolve()
+    bundle = read_bundle_payload(identity)
+    name, target, known_hosts_line = validate_bundle_payload(bundle, identity)
+    if not args.dry_run:
+        restrict_local_file(identity)
+    if client_public_fingerprint(identity) != str(bundle["client_key_sha256"]):
+        raise YunError("PEM private identity does not match its embedded client fingerprint")
+
+    registry = load_registry_or_empty()
+    existing_target = registry["targets"].get(name)
+    cache = pathlib.Path(str(target["known_hosts_file"]))
+    desired_cache = known_hosts_line + "\n"
+    existing_cache: str | None = None
+    if cache.exists():
+        try:
+            existing_cache = cache.read_text(encoding="utf-8")
+        except UnicodeDecodeError as exc:
+            raise YunError(f"existing host-key cache is not UTF-8: {cache}") from exc
+
+    target_changes = existing_target is not None and existing_target != target
+    cache_changes = existing_cache is not None and existing_cache != desired_cache
+    if (target_changes or cache_changes) and args.confirm_replace != name:
+        raise YunError(f"import replacement requires --confirm-replace {name}")
+
+    if existing_target == target and existing_cache == desired_cache:
+        verify_target_payload(name, target)
+        print(f"imported={name}")
+        print("state=existing")
+        return 0
+
+    candidate_registry = {
+        "schema_version": registry["schema_version"],
+        "targets": dict(registry["targets"]),
+    }
+    candidate_registry["targets"][name] = target
+    validate_registry(candidate_registry)
+    if args.dry_run:
+        print(f"would_import={name}")
+        print(f"identity_file={identity}")
+        print(f"registry={registry_path()}")
+        return 0
+
+    cache_existed = cache.exists()
+    try:
+        write_public_text(cache, desired_cache)
+        verify_target_payload(name, target)
+        write_registry(candidate_registry)
+    except Exception:
+        if cache_existed and existing_cache is not None:
+            write_public_text(cache, existing_cache)
+        elif not cache_existed and cache.exists():
+            cache.unlink()
+        raise
+    print(f"imported={name}")
+    print(f"identity_file={identity}")
+    print(f"registry={registry_path()}")
+    print("state=replaced" if target_changes or cache_changes else "state=created")
+    return 0
+
+
 def cmd_probe(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     remote = r"""
@@ -823,7 +1177,7 @@ def add_protected_confirmation(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="云：strict registered SSH control and durable remote jobs"
+        description="云：self-describing PEM SSH control and durable remote jobs"
     )
     parser.add_argument(
         "--dry-run", action="store_true", help="print external actions without running them"
@@ -860,6 +1214,21 @@ def build_parser() -> argparse.ArgumentParser:
     keygen.add_argument("name")
     keygen.add_argument("--directory", default=str(pathlib.Path.home() / ".ssh"))
     keygen.set_defaults(func=cmd_keygen)
+
+    bundle = subparsers.add_parser(
+        "bundle-pem", help="embed verified public connection metadata in one PEM"
+    )
+    bundle.add_argument("target")
+    add_protected_confirmation(bundle)
+    bundle.add_argument("--confirm-rebind")
+    bundle.set_defaults(func=cmd_bundle_pem)
+
+    import_pem = subparsers.add_parser(
+        "import-pem", help="rebuild a target and host-key cache from one bundled PEM"
+    )
+    import_pem.add_argument("pem")
+    import_pem.add_argument("--confirm-replace")
+    import_pem.set_defaults(func=cmd_import_pem)
 
     probe = subparsers.add_parser("probe", help="run a read-only identity/readiness probe")
     probe.add_argument("target")

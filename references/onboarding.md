@@ -10,7 +10,7 @@ hosts.
 Ordinary control needs only Python 3 and OpenSSH on the controller and reachable
 sshd on Linux. Do not require Tailscale, a cloud SDK, MCP, or `~/.ssh/config`.
 
-Initialize the external registry:
+Initialize the external registry for first-time server onboarding:
 
 ```text
 python scripts/yunctl.py init
@@ -91,3 +91,35 @@ python scripts/yunctl.py probe TARGET_NAME
 The probe uses direct OpenSSH flags with `-F none`, the exact PEM, no SSH agent,
 strict checking, and only the dedicated known-hosts file. For compute targets,
 also complete one bounded success/fetch job and one disposable cancellation job.
+
+## 7. Make the PEM portable
+
+After the registered probe succeeds, embed only the verified public connection
+record into the existing PEM:
+
+```text
+python scripts/yunctl.py bundle-pem TARGET_NAME
+```
+
+For a protected target, add `--confirm-target TARGET_NAME`. The command builds a
+restricted same-directory candidate, proves OpenSSH derives the same client
+fingerprint, and then atomically replaces the original. It does not create a
+persistent private-key backup or alter the server-side public key.
+
+The resulting `YUN-BUNDLE-V1` file remains a directly usable RSA PEM. Its first
+comment line carries target name, host, port, user, roles/protection, the
+verified ED25519 host key, and client/server SHA-256 fingerprints. These are
+public connection facts; the RSA private body remains unchanged.
+
+On another controller, carry only this Skill and that PEM, then run:
+
+```text
+python scripts/yunctl.py import-pem ABSOLUTE_PATH/yun_TARGET_NAME.pem
+python scripts/yunctl.py probe TARGET_NAME
+```
+
+`import-pem` restricts copied-key permissions, derives and checks the client
+public fingerprint, checks the embedded host binding, and recreates the local
+registry and known-hosts cache. The `.pub`, original registry, and original
+known-hosts file do not need to travel. Network reachability and the already
+installed server-side public key are still required.
