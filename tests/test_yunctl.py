@@ -77,12 +77,32 @@ class RegistryTests(unittest.TestCase):
             path = Path(temporary) / "config" / "targets.json"
             with mock.patch.dict(os.environ, {MODULE.REGISTRY_ENV: str(path)}), mock.patch.object(
                 MODULE, "restrict_local_file"
-            ):
+            ), mock.patch.object(MODULE, "legacy_windows_registry_path") as legacy:
                 self.assertEqual(MODULE.main(["init"]), 0)
                 self.assertEqual(MODULE.main(["init"]), 0)
                 self.assertEqual(MODULE.load_registry(), {})
+            legacy.assert_not_called()
             self.assertEqual(
                 json.loads(path.read_text(encoding="utf-8")),
+                {"schema_version": 1, "targets": {}},
+            )
+
+    @unittest.skipUnless(os.name == "nt", "Windows registry migration")
+    def test_init_migrates_legacy_windows_registry(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            legacy = root / "legacy-local-app-data" / "yun" / "targets.json"
+            portable = root / "profile" / ".yun" / "targets.json"
+            legacy.parent.mkdir(parents=True)
+            legacy.write_text(
+                json.dumps({"schema_version": 1, "targets": {}}), encoding="utf-8"
+            )
+            with mock.patch.dict(os.environ, {"LOCALAPPDATA": str(legacy.parents[1])}), mock.patch.object(
+                MODULE, "DEFAULT_REGISTRY_PATH", portable
+            ), mock.patch.object(MODULE, "restrict_local_file"):
+                self.assertEqual(MODULE.main(["init"]), 0)
+            self.assertEqual(
+                json.loads(portable.read_text(encoding="utf-8")),
                 {"schema_version": 1, "targets": {}},
             )
 

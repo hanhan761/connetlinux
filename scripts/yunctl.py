@@ -86,6 +86,15 @@ def default_registry_path(
 DEFAULT_REGISTRY_PATH = default_registry_path()
 
 
+def legacy_windows_registry_path() -> pathlib.Path | None:
+    if os.name != "nt":
+        return None
+    local_app_data = os.environ.get("LOCALAPPDATA")
+    if not local_app_data:
+        return None
+    return (pathlib.Path(local_app_data) / "yun" / "targets.json").resolve()
+
+
 def printable(argv: Sequence[str]) -> str:
     return shlex.join([str(item) for item in argv])
 
@@ -717,6 +726,14 @@ def cmd_init(args: argparse.Namespace) -> int:
         load_registry_payload()
         print(f"registry={path}")
         print("state=existing")
+        return 0
+    legacy = None if os.environ.get(REGISTRY_ENV) else legacy_windows_registry_path()
+    if legacy is not None and legacy != path and legacy.is_file():
+        payload = validate_registry(json.loads(legacy.read_text(encoding="utf-8")))
+        write_registry(payload, dry_run=args.dry_run)
+        print(f"registry={path}")
+        print(f"migrated_from={legacy}")
+        print("state=would-migrate" if args.dry_run else "state=migrated")
         return 0
     write_registry(empty_registry(), dry_run=args.dry_run)
     print(f"registry={path}")

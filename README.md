@@ -28,6 +28,8 @@ python scripts/yunctl.py --help
 `~/.config/yun/targets.json`。该位置避免 Microsoft Store Python 对
 `%LOCALAPPDATA%` 的按包重定向，因此不同 Python 安装会共用同一份状态。工具会
 以 `icacls` 收紧私钥和注册表 ACL；不要把 PEM 放在同步盘、共享目录或版本库中。
+从旧版本升级时，首次 `init` 会在新目录尚不存在的前提下迁移已验证的旧
+`%LOCALAPPDATA%\yun\targets.json`。
 
 ## 换一台电脑
 
