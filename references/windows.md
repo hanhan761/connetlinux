@@ -39,6 +39,7 @@ python scripts/yunctl.py exec windows-server --read-only -- Get-Service sshd
 
 ## 当前边界
 
-Windows 目标支持探测、显式只读/写命令和有界文件传输。`compute` 角色、`submit`
-和任务生命周期仍是 Linux 专用功能，因为它们依赖 Bash、tmux 和 setsid；不要为
-Windows 目标登记 `--role compute`。
+Windows 目标支持探测、显式只读/写命令、有界文件传输和完整 compute 生命周期。
+为计算节点登记 `--role server --role compute`；yun 使用 Windows Task Scheduler
+运行每个 PowerShell 作业，因此任务可在 SSH 断开后继续。目标 SSH 账号必须具有
+创建、启动、查询、停止和删除其专属 Scheduled Task 的权限。

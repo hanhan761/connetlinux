@@ -21,6 +21,7 @@ from typing import Any, Sequence
 
 SKILL_ROOT = pathlib.Path(__file__).resolve().parents[1]
 RUNNER_PATH = pathlib.Path(__file__).with_name("yun_job_runner.sh")
+WINDOWS_RUNNER_PATH = pathlib.Path(__file__).with_name("yun_job_runner.ps1")
 REGISTRY_ENV = "YUN_TARGETS_FILE"
 JOB_ROOT = ".yun/jobs"
 JOB_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -221,11 +222,10 @@ def validate_target(name: str, target: Any) -> dict[str, Any]:
     if not isinstance(platform, str) or platform not in ALLOWED_PLATFORMS:
         raise YunError(f"target {name!r} has invalid platform")
     target["platform"] = platform
-    if platform == "windows" and "compute" in roles:
-        raise YunError(f"target {name!r} Windows targets do not support compute")
     if "compute" in roles:
-        if target.get("compute_backend") != "tmux" or target.get("job_root") != JOB_ROOT:
-            raise YunError(f"target {name!r} compute contract must use tmux and {JOB_ROOT}")
+        backend = "scheduled-task" if platform == "windows" else "tmux"
+        if target.get("compute_backend") != backend or target.get("job_root") != JOB_ROOT:
+            raise YunError(f"target {name!r} compute contract must use {backend} and {JOB_ROOT}")
     elif target.get("compute_backend") is not None or target.get("job_root") is not None:
         raise YunError(f"target {name!r} has compute fields without the compute role")
     return target
@@ -464,7 +464,9 @@ def validate_bundle_payload(
         "expected_host_key_sha256": host_fingerprint,
         "roles": roles,
         "protected": connection.get("protected"),
-        "compute_backend": "tmux" if isinstance(roles, list) and "compute" in roles else None,
+        "compute_backend": (
+            "scheduled-task" if connection.get("platform") == "windows" else "tmux"
+        ) if isinstance(roles, list) and "compute" in roles else None,
         "job_root": JOB_ROOT if isinstance(roles, list) and "compute" in roles else None,
         "platform": connection.get("platform", "linux"),
     }
@@ -818,7 +820,9 @@ def cmd_register(args: argparse.Namespace) -> int:
         "expected_host_key_sha256": args.host_fingerprint,
         "roles": roles,
         "protected": bool(args.protected),
-        "compute_backend": "tmux" if "compute" in roles else None,
+        "compute_backend": (
+            "scheduled-task" if getattr(args, "platform", "linux") == "windows" else "tmux"
+        ) if "compute" in roles else None,
         "job_root": JOB_ROOT if "compute" in roles else None,
         "platform": getattr(args, "platform", "linux"),
     }
@@ -1067,6 +1071,8 @@ def cmd_submit(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "compute")
     require_protected_confirmation(args.target, target, args.confirm_target)
+    if target["platform"] == "windows":
+        return cmd_submit_windows(args, target)
     if target.get("compute_backend") != "tmux":
         raise YunError("this CLI submits only to registered tmux targets")
     script = pathlib.Path(args.script).expanduser().resolve()
@@ -1121,9 +1127,72 @@ tmux new-session -d -s "$session" "bash \"$root/runner.sh\" \"$root\""
     return 0
 
 
+def windows_job_root(job_id: str) -> str:
+    validate_job_id(job_id)
+    return f"$HOME/.yun/jobs/{job_id}"
+
+
+def windows_task_name(job_id: str) -> str:
+    validate_job_id(job_id)
+    return f"yun-{job_id}"
+
+
+def cmd_submit_windows(args: argparse.Namespace, target: dict[str, Any]) -> int:
+    if target.get("compute_backend") != "scheduled-task":
+        raise YunError("this CLI submits Windows jobs only to scheduled-task targets")
+    script = pathlib.Path(args.script).expanduser().resolve()
+    if not script.is_file() or script.suffix.lower() != ".ps1":
+        raise YunError("Windows jobs require an existing .ps1 script")
+    if script.stat().st_size > 10 * 1024 * 1024 or not WINDOWS_RUNNER_PATH.is_file():
+        raise YunError("Windows job input is invalid")
+    job_id = new_job_id(args.name or script.stem)
+    root = windows_job_root(job_id)
+    task = windows_task_name(job_id)
+    create = f"""$root = Join-Path $HOME '.yun\\jobs\\{job_id}'
+if (Test-Path -LiteralPath $root) {{ throw 'job already exists' }}
+New-Item -ItemType Directory -Force -Path (Join-Path $root 'results') | Out-Null
+"""
+    if ssh_run(target, create, dry_run=args.dry_run).returncode != 0:
+        return 1
+    for source, name in ((script, "job.ps1"), (WINDOWS_RUNNER_PATH, "runner.ps1")):
+        result = run_external([*scp_argv(target), str(source), f"{destination(target, scp=True)}:{root}/{name}"], dry_run=args.dry_run, display=f"scp <job-file> {destination(target, scp=True)}:<job-path>")
+        if result.returncode != 0:
+            return result.returncode
+    start = f"""$root = Join-Path $HOME '.yun\\jobs\\{job_id}'
+$task = '{task}'
+$runner = Join-Path $root 'runner.ps1'
+$arguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "' + $runner + '" -JobDir "' + $root + '"'
+$action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument $arguments
+$trigger = New-ScheduledTaskTrigger -Once -At ((Get-Date).AddYears(1))
+$principal = New-ScheduledTaskPrincipal -UserId ([Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType S4U -RunLevel Limited
+Register-ScheduledTask -TaskName $task -TaskPath '\yun\' -Action $action -Trigger $trigger -Principal $principal -Force | Out-Null
+Start-ScheduledTask -TaskName $task -TaskPath '\yun\'
+"""
+    result = ssh_run(target, start, capture=True, dry_run=args.dry_run)
+    if result.returncode != 0:
+        if result.stderr:
+            print(result.stderr, file=sys.stderr, end="")
+        return result.returncode
+    print(job_id)
+    return 0
+
+
+def windows_job_status(target: dict[str, Any], job_id: str, dry_run: bool) -> int:
+    validate_job_id(job_id)
+    remote = f"""$root = Join-Path $HOME '.yun\\jobs\\{job_id}'
+if (-not (Test-Path $root)) {{ throw 'job missing' }}
+foreach ($field in @('status','started_at','finished_at','exit_code','child_pid')) {{ $path = Join-Path $root $field; if (Test-Path $path) {{ Write-Output ($field + '=' + (Get-Content $path -Raw).Trim()) }} }}
+$task = Get-ScheduledTask -TaskName 'yun-{job_id}' -TaskPath '\\yun\\' -ErrorAction SilentlyContinue
+Write-Output ('session=' + $(if ($task -and $task.State -eq 'Running') {{ 'running' }} else {{ 'absent' }}))
+Write-Output ('size=' + ((Get-ChildItem -LiteralPath $root -Recurse -Force | Measure-Object -Property Length -Sum).Sum))"""
+    return ssh_run(target, remote, dry_run=dry_run).returncode
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "compute")
+    if target["platform"] == "windows":
+        return windows_job_status(target, args.job_id, args.dry_run)
     shell_path, _ = job_paths(target, args.job_id)
     session = f"yun-{args.job_id}"
     remote = f'''set -eu
@@ -1141,6 +1210,10 @@ printf 'size='; du -sh "$root" | awk '{{print $1}}'
 def cmd_jobs(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "compute")
+    if target["platform"] == "windows":
+        remote = """$base = Join-Path $HOME '.yun\\jobs'
+if (Test-Path $base) { Get-ChildItem -LiteralPath $base -Directory | Where-Object { $_.Name -match '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$' } | Sort-Object Name | ForEach-Object { $status = if (Test-Path (Join-Path $_.FullName 'status')) { (Get-Content (Join-Path $_.FullName 'status') -Raw).Trim() } else { 'unknown' }; $started = if (Test-Path (Join-Path $_.FullName 'started_at')) { (Get-Content (Join-Path $_.FullName 'started_at') -Raw).Trim() } else { '-' }; Write-Output ($_.Name + "`t" + $status + "`t" + $started) } }"""
+        return ssh_run(target, remote, dry_run=args.dry_run).returncode
     remote = f'''set -eu
 base="$HOME/{JOB_ROOT}"
 test -d "$base" || exit 0
@@ -1157,6 +1230,17 @@ done
 def cmd_logs(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "compute")
+    if target["platform"] == "windows":
+        root = windows_job_root(args.job_id)
+        lines = max(1, min(args.lines, 5000))
+        remote = f"""$root = Join-Path $HOME '.yun\\jobs\\{args.job_id}'
+if (-not (Test-Path $root)) {{ throw 'job missing' }}
+Write-Output '--- stdout ---'; if (Test-Path (Join-Path $root 'stdout.log')) {{ Get-Content (Join-Path $root 'stdout.log') -Tail {lines} }}
+Write-Output '--- stderr ---'; if (Test-Path (Join-Path $root 'stderr.log')) {{ Get-Content (Join-Path $root 'stderr.log') -Tail {lines} }}"""
+        result = ssh_run(target, remote, capture=True, dry_run=args.dry_run)
+        if result.stdout: print(redact(result.stdout), end="")
+        if result.stderr: print(redact(result.stderr), file=sys.stderr, end="")
+        return result.returncode
     shell_path, _ = job_paths(target, args.job_id)
     lines = max(1, min(args.lines, 5000))
     remote = f'''set -eu
@@ -1179,6 +1263,14 @@ def cmd_cancel(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "compute")
     require_protected_confirmation(args.target, target, args.confirm_target)
+    if target["platform"] == "windows":
+        validate_job_id(args.job_id)
+        remote = f"""$root = Join-Path $HOME '.yun\\jobs\\{args.job_id}'
+if (-not (Test-Path $root)) {{ throw 'job missing' }}
+$status = if (Test-Path (Join-Path $root 'status')) {{ (Get-Content (Join-Path $root 'status') -Raw).Trim() }} else {{ 'unknown' }}
+if ($status -notin @('succeeded','failed','cancelled')) {{ New-Item -ItemType File -Force -Path (Join-Path $root 'cancel_requested') | Out-Null; Stop-ScheduledTask -TaskName 'yun-{args.job_id}' -TaskPath '\\yun\\' -ErrorAction SilentlyContinue; Set-Content -NoNewline -Path (Join-Path $root 'status') -Value 'cancelled'; Set-Content -NoNewline -Path (Join-Path $root 'finished_at') -Value ([DateTime]::UtcNow.ToString('o')); Set-Content -NoNewline -Path (Join-Path $root 'exit_code') -Value '143' }}
+Write-Output 'cancel_requested={args.job_id}'"""
+        return ssh_run(target, remote, dry_run=args.dry_run).returncode
     shell_path, _ = job_paths(target, args.job_id)
     session = f"yun-{args.job_id}"
     remote = f'''set -eu
@@ -1207,6 +1299,15 @@ printf 'cancel_requested=%s\n' {shlex.quote(args.job_id)}
 def cmd_fetch(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "compute")
+    if target["platform"] == "windows":
+        validate_job_id(args.job_id)
+        check = ssh_run(target, f"$results = Join-Path $HOME '.yun\\jobs\\{args.job_id}\\results'; if (-not (Test-Path $results)) {{ throw 'results missing' }}", dry_run=args.dry_run)
+        if check.returncode != 0:
+            return check.returncode
+        local_destination = pathlib.Path(args.destination).expanduser().resolve() / args.job_id
+        if not args.dry_run:
+            local_destination.parent.mkdir(parents=True, exist_ok=True)
+        return run_external([*scp_argv(target, recursive=True), f"{destination(target, scp=True)}:$HOME/.yun/jobs/{args.job_id}/results", str(local_destination)], dry_run=args.dry_run, display=f"scp {destination(target, scp=True)}:<job-results> <local-dir>").returncode
     _, scp_path = job_paths(target, args.job_id)
     check = ssh_run(
         target,
@@ -1233,6 +1334,18 @@ def cmd_cleanup(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
     require_role(target, "compute")
     require_protected_confirmation(args.target, target, args.confirm_target)
+    if target["platform"] == "windows":
+        if args.confirm_job != args.job_id:
+            raise YunError(f"cleanup requires --confirm-job {args.job_id}")
+        validate_job_id(args.job_id)
+        remote = f"""$root = Join-Path $HOME '.yun\\jobs\\{args.job_id}'
+if (-not (Test-Path $root)) {{ throw 'job missing' }}
+$state = (Get-Content (Join-Path $root 'status') -Raw).Trim()
+if ($state -notin @('succeeded','failed','cancelled')) {{ throw 'job is not terminal' }}
+Unregister-ScheduledTask -TaskName 'yun-{args.job_id}' -TaskPath '\\yun\\' -Confirm:$false -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $root -Recurse -Force
+Write-Output 'cleaned={args.job_id}'"""
+        return ssh_run(target, remote, dry_run=args.dry_run).returncode
     validate_job_id(args.job_id)
     if args.confirm_job != args.job_id:
         raise YunError(f"cleanup requires --confirm-job {args.job_id}")

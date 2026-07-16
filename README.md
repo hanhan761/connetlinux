@@ -33,8 +33,8 @@ python scripts/yunctl.py --help
 `%LOCALAPPDATA%\yun\targets.json`。
 
 Windows 目标使用显式 PowerShell，不依赖 OpenSSH 的默认 `cmd.exe` shell；支持
-`probe`、`exec`、`upload` 和 `download`。远程持久计算仍仅支持 Linux 的
-`bash`/`tmux`/`setsid` 后端。Windows 目标接入步骤见
+`probe`、`exec`、`upload` 和 `download`。Windows 计算使用 Task Scheduler，
+Linux 计算继续使用 `bash`/`tmux`/`setsid` 后端。Windows 目标接入步骤见
 [references/windows.md](references/windows.md)。
 
 ## 换一台电脑

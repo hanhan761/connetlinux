@@ -255,7 +255,7 @@ class WindowsTargetTests(unittest.TestCase):
         selected["roles"] = ["server", "compute"]
         selected["compute_backend"] = "tmux"
         selected["job_root"] = MODULE.JOB_ROOT
-        with self.assertRaisesRegex(MODULE.YunError, "do not support compute"):
+        with self.assertRaisesRegex(MODULE.YunError, "scheduled-task"):
             MODULE.validate_target("worker-one", selected)
 
     def test_windows_remote_scripts_use_explicit_powershell(self) -> None:
