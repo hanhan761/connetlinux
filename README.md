@@ -1,6 +1,6 @@
 # 云（`/yun`）
 
-一个可移交给其他 Codex 智能体使用的 Linux 服务器控制 Skill：每台服务器一个自描述 RSA-4096 PEM。换控制电脑时只携带 Skill 和 PEM，即可重建安全连接，进行 SSH 运维或提交、观察、取消、取回远程计算任务。
+一个可移交给其他 Codex 智能体使用的 Linux/Windows 服务器控制 Skill：每台服务器一个自描述 RSA-4096 PEM。换控制电脑时只携带 Skill 和 PEM，即可重建安全连接，进行 SSH 运维或提交、观察、取消、取回远程计算任务。
 
 ![云 Skill：一台服务器一个 PEM 的完整流程](assets/yun-skill-flow.png)
 
@@ -15,7 +15,8 @@
 
 ## Windows 控制端
 
-Windows 10/11 可以作为控制端；被管理目标仍是 Linux。请在 PowerShell 中确认
+Windows 10/11 可以作为控制端。Windows Server 2019+ 也可作为 `server` 目标，
+前提是已由目标端管理员配置 OpenSSH Server。请在控制端 PowerShell 中确认
 Python 3、Windows OpenSSH Client 的 `ssh` 和 `ssh-keygen` 都在 `PATH`：
 
 ```powershell
@@ -30,6 +31,11 @@ python scripts/yunctl.py --help
 以 `icacls` 收紧私钥和注册表 ACL；不要把 PEM 放在同步盘、共享目录或版本库中。
 从旧版本升级时，首次 `init` 会在新目录尚不存在的前提下迁移已验证的旧
 `%LOCALAPPDATA%\yun\targets.json`。
+
+Windows 目标使用显式 PowerShell，不依赖 OpenSSH 的默认 `cmd.exe` shell；支持
+`probe`、`exec`、`upload` 和 `download`。远程持久计算仍仅支持 Linux 的
+`bash`/`tmux`/`setsid` 后端。Windows 目标接入步骤见
+[references/windows.md](references/windows.md)。
 
 ## 换一台电脑
 

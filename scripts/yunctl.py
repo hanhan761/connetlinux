@@ -29,7 +29,8 @@ HOST_FINGERPRINT_PATTERN = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}$")
 HOST_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 SSH_USER_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 BUNDLE_PREFIX = b"# YUN-BUNDLE-V1 "
-BUNDLE_SCHEMA_VERSION = 1
+BUNDLE_SCHEMA_VERSION = 2
+BUNDLE_SCHEMA_VERSIONS = {1, 2}
 BUNDLE_MAX_HEADER_BYTES = 8192
 MAX_PRIVATE_KEY_BYTES = 1024 * 1024
 BUNDLE_KEYS = {
@@ -47,8 +48,11 @@ BUNDLE_CONNECTION_KEYS = {
     "user",
     "roles",
     "protected",
+    "platform",
 }
+LEGACY_BUNDLE_CONNECTION_KEYS = BUNDLE_CONNECTION_KEYS - {"platform"}
 ALLOWED_ROLES = {"server", "compute"}
+ALLOWED_PLATFORMS = {"linux", "windows"}
 ALLOWED_TARGET_KEYS = {
     "description",
     "hostname",
@@ -61,6 +65,7 @@ ALLOWED_TARGET_KEYS = {
     "protected",
     "compute_backend",
     "job_root",
+    "platform",
 }
 
 
@@ -212,6 +217,12 @@ def validate_target(name: str, target: Any) -> dict[str, Any]:
         or len(set(roles)) != len(roles)
     ):
         raise YunError(f"target {name!r} has invalid roles")
+    platform = target.get("platform", "linux")
+    if not isinstance(platform, str) or platform not in ALLOWED_PLATFORMS:
+        raise YunError(f"target {name!r} has invalid platform")
+    target["platform"] = platform
+    if platform == "windows" and "compute" in roles:
+        raise YunError(f"target {name!r} Windows targets do not support compute")
     if "compute" in roles:
         if target.get("compute_backend") != "tmux" or target.get("job_root") != JOB_ROOT:
             raise YunError(f"target {name!r} compute contract must use tmux and {JOB_ROOT}")
@@ -410,14 +421,18 @@ def read_bundle_payload(identity: pathlib.Path) -> dict[str, Any]:
 def validate_bundle_payload(
     payload: dict[str, Any], identity: pathlib.Path
 ) -> tuple[str, dict[str, Any], str]:
-    if set(payload) != BUNDLE_KEYS or payload.get("schema_version") != BUNDLE_SCHEMA_VERSION:
+    version = payload.get("schema_version")
+    if set(payload) != BUNDLE_KEYS or version not in BUNDLE_SCHEMA_VERSIONS:
         raise YunError("unsupported or malformed self-describing PEM schema")
     name = payload.get("name")
     if not isinstance(name, str):
         raise YunError("self-describing PEM requires a target name")
     validate_target_name(name)
     connection = payload.get("connection")
-    if not isinstance(connection, dict) or set(connection) != BUNDLE_CONNECTION_KEYS:
+    expected_connection_keys = (
+        LEGACY_BUNDLE_CONNECTION_KEYS if version == 1 else BUNDLE_CONNECTION_KEYS
+    )
+    if not isinstance(connection, dict) or set(connection) != expected_connection_keys:
         raise YunError("self-describing PEM has malformed connection metadata")
     known_hosts_line = payload.get("known_hosts_line")
     if (
@@ -451,6 +466,7 @@ def validate_bundle_payload(
         "protected": connection.get("protected"),
         "compute_backend": "tmux" if isinstance(roles, list) and "compute" in roles else None,
         "job_root": JOB_ROOT if isinstance(roles, list) and "compute" in roles else None,
+        "platform": connection.get("platform", "linux"),
     }
     validate_target(name, target)
     resolved_connection_files(target, require_exists=False)
@@ -503,6 +519,7 @@ def build_bundle_payload(name: str, target: dict[str, Any]) -> dict[str, Any]:
             "user": target["user"],
             "roles": target["roles"],
             "protected": target["protected"],
+            "platform": target["platform"],
         },
         "known_hosts_line": verified_host_key_line(target),
         "host_key_sha256": target["expected_host_key_sha256"],
@@ -652,6 +669,20 @@ def destination(target: dict[str, Any], *, scp: bool = False) -> str:
     return f"{target['user']}@{hostname}"
 
 
+def powershell_command(script: str) -> str:
+    encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
+    return f"powershell.exe -NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
+
+
+def prepare_remote_command(target: dict[str, Any], script: str) -> str:
+    return powershell_command(script) if target["platform"] == "windows" else script
+
+
+def windows_exec_command(command: Sequence[str]) -> str:
+    quoted = ["'" + value.replace("'", "''") + "'" for value in command]
+    return "& " + " ".join(quoted)
+
+
 def scp_argv(target: dict[str, Any], *, recursive: bool = False) -> list[str]:
     argv = ["scp", *connection_options(target), "-P", str(target["port"])]
     if recursive:
@@ -667,6 +698,7 @@ def ssh_run(
     dry_run: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     remote = destination(target)
+    command = prepare_remote_command(target, remote_command)
     return run_external(
         [
             "ssh",
@@ -674,7 +706,7 @@ def ssh_run(
             "-p",
             str(target["port"]),
             remote,
-            remote_command,
+            command,
         ],
         capture=capture,
         dry_run=dry_run,
@@ -788,6 +820,7 @@ def cmd_register(args: argparse.Namespace) -> int:
         "protected": bool(args.protected),
         "compute_backend": "tmux" if "compute" in roles else None,
         "job_root": JOB_ROOT if "compute" in roles else None,
+        "platform": getattr(args, "platform", "linux"),
     }
     validate_target(name, target)
     if name in payload["targets"] and args.confirm_replace != name:
@@ -947,7 +980,7 @@ def cmd_import_pem(args: argparse.Namespace) -> int:
 
 def cmd_probe(args: argparse.Namespace) -> int:
     target = verify_target(args.target)
-    remote = r"""
+    linux_probe = r"""
 set -u
 printf 'YUN_PROBE_OK\n'
 printf 'hostname='; hostname
@@ -959,6 +992,21 @@ printf 'memory='; LANG=C free -h | awk '/^Mem:/ {print $2","$3","$7}'
 printf 'scheduler='; if command -v tmux >/dev/null 2>&1 && command -v setsid >/dev/null 2>&1; then echo tmux; else echo none; fi
 printf 'gpu='; if command -v nvidia-smi >/dev/null 2>&1; then if gpu_info=$(nvidia-smi --query-gpu=name,memory.total --format=csv,noheader 2>/dev/null); then printf '%s\n' "$gpu_info" | paste -sd';' -; else echo unavailable; fi; else echo none; fi
 """.strip()
+    windows_probe = r"""
+$ErrorActionPreference = 'Stop'
+Write-Output 'YUN_PROBE_OK'
+Write-Output ('hostname=' + $env:COMPUTERNAME)
+Write-Output ('user=' + [Security.Principal.WindowsIdentity]::GetCurrent().Name)
+$os = Get-CimInstance Win32_OperatingSystem
+Write-Output ('kernel=' + $os.Caption + ' ' + $os.Version)
+Write-Output ('uptime=' + ((Get-Date) - $os.LastBootUpTime).ToString())
+$disk = Get-CimInstance Win32_LogicalDisk -Filter "DeviceID='C:'"
+Write-Output ('root_disk=' + $disk.Size + ',' + $disk.Size - $disk.FreeSpace + ',' + $disk.FreeSpace)
+Write-Output ('memory=' + $os.TotalVisibleMemorySize + ',' + ($os.TotalVisibleMemorySize - $os.FreePhysicalMemory) + ',' + $os.FreePhysicalMemory)
+Write-Output 'scheduler=none'
+if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) { Write-Output 'gpu=available' } else { Write-Output 'gpu=none' }
+""".strip()
+    remote = windows_probe if target["platform"] == "windows" else linux_probe
     return ssh_run(target, remote, dry_run=args.dry_run).returncode
 
 
@@ -972,7 +1020,8 @@ def cmd_exec(args: argparse.Namespace) -> int:
         command.pop(0)
     if not command:
         raise YunError("remote command is required after --")
-    return ssh_run(target, shlex.join(command), dry_run=args.dry_run).returncode
+    remote = windows_exec_command(command) if target["platform"] == "windows" else shlex.join(command)
+    return ssh_run(target, remote, dry_run=args.dry_run).returncode
 
 
 def valid_remote_path(value: str) -> str:
@@ -1233,6 +1282,7 @@ def build_parser() -> argparse.ArgumentParser:
     register.add_argument("--host", required=True)
     register.add_argument("--port", type=int, default=22)
     register.add_argument("--user", required=True)
+    register.add_argument("--platform", choices=sorted(ALLOWED_PLATFORMS), default="linux")
     register.add_argument("--pem")
     register.add_argument("--known-hosts")
     register.add_argument("--host-fingerprint", required=True)

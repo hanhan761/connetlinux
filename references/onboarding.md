@@ -8,7 +8,8 @@ console, KVM, cloud-init, or an existing administrator account. Do not scan for
 hosts.
 
 Ordinary control needs only Python 3 and OpenSSH on the controller and reachable
-sshd on Linux. Do not require Tailscale, a cloud SDK, MCP, or `~/.ssh/config`.
+sshd on Linux or OpenSSH Server on Windows. Do not require Tailscale, a cloud
+SDK, MCP, or `~/.ssh/config`.
 Windows 10/11 controllers are supported when `python`, `ssh`, and `ssh-keygen`
 are available in PowerShell. Their registry defaults to
 `%USERPROFILE%\.yun\targets.json`; Linux/macOS uses `~/.config/yun/targets.json`.
@@ -90,6 +91,8 @@ python scripts/yunctl.py register TARGET_NAME \
 Add `--role compute` only when remote Bash, tmux, and setsid jobs are authorized;
 add `--protected` for production/shared targets. `register` refuses a missing or
 non-PEM identity, missing known-hosts file, or fingerprint mismatch.
+Use `--platform windows` for a Windows OpenSSH Server target; Windows targets
+currently support only the `server` role.
 
 ## 6. Accept
 

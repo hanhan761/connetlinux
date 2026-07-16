@@ -1,6 +1,6 @@
 ---
 name: yun
-description: Connect and operate authorized Linux SSH servers from one self-describing RSA PEM per target, onboard or import that PEM, pin host identity, transfer bounded files, and submit, monitor, cancel, fetch, or clean durable remote compute jobs. Use when the user invokes /yun or $yun, supplies a yun_*.pem, wants another agent to control a Linux server without carrying registry/known-host/SSH-config files, needs to generate a PEM, or asks to run remote computation.
+description: Connect and operate authorized Linux or Windows SSH servers from one self-describing RSA PEM per target, onboard or import that PEM, pin host identity, transfer bounded files, and submit, monitor, cancel, fetch, or clean durable Linux compute jobs. Use when the user invokes /yun or $yun, supplies a yun_*.pem, wants another agent to control a server without carrying registry/known-host/SSH-config files, needs to generate a PEM, or asks to run remote computation.
 ---
 
 # 云
@@ -89,7 +89,9 @@ agents on every command. The PEM embeds public connection metadata, never a
 second credential; its RSA private body remains directly OpenSSH-compatible.
 
 Ordinary server control requires only Python 3, the system OpenSSH client, a
-reachable Linux sshd, and one bundled PEM. Registry and known-hosts cache are
+reachable Linux sshd or Windows OpenSSH Server, and one bundled PEM. Windows
+targets use explicit PowerShell and support server operations, while durable
+compute remains Linux-only. Registry and known-hosts cache are
 generated on import. Tailscale, cloud SDKs, MCP, and user SSH config are not
 required by the Skill. The optional compute branch also requires remote Bash,
 tmux, and setsid.
