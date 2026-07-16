@@ -11,7 +11,9 @@ Ordinary control needs only Python 3 and OpenSSH on the controller and reachable
 sshd on Linux. Do not require Tailscale, a cloud SDK, MCP, or `~/.ssh/config`.
 Windows 10/11 controllers are supported when `python`, `ssh`, and `ssh-keygen`
 are available in PowerShell. Their registry defaults to
-`%LOCALAPPDATA%\yun\targets.json`; Linux/macOS uses `~/.config/yun/targets.json`.
+`%USERPROFILE%\.yun\targets.json`; Linux/macOS uses `~/.config/yun/targets.json`.
+This avoids Microsoft Store Python redirecting `%LOCALAPPDATA%` into a
+per-package cache.
 
 Initialize the external registry for first-time server onboarding:
 

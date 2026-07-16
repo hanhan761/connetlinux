@@ -62,16 +62,8 @@ class RegistryTests(unittest.TestCase):
             home / ".config" / "yun" / "targets.json",
         )
         self.assertEqual(
-            MODULE.default_registry_path(
-                platform_name="nt",
-                local_app_data=r"C:\Users\yun-user\AppData\Local",
-                home=home,
-            ),
-            Path(r"C:\Users\yun-user\AppData\Local") / "yun" / "targets.json",
-        )
-        self.assertEqual(
-            MODULE.default_registry_path(platform_name="nt", local_app_data="", home=home),
-            home / "AppData" / "Local" / "yun" / "targets.json",
+            MODULE.default_registry_path(platform_name="nt", home=home),
+            home / ".yun" / "targets.json",
         )
 
     def test_registry_refuses_skill_internal_runtime_state(self) -> None:

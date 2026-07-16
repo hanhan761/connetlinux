@@ -71,19 +71,15 @@ class YunError(RuntimeError):
 def default_registry_path(
     *,
     platform_name: str | None = None,
-    local_app_data: str | None = None,
     home: pathlib.Path | None = None,
 ) -> pathlib.Path:
-    """Return the platform-appropriate location for user-local runtime state."""
+    """Return a stable user-local location for runtime state."""
     platform_name = os.name if platform_name is None else platform_name
     home = pathlib.Path.home() if home is None else home
     if platform_name == "nt":
-        local_app_data = (
-            os.environ.get("LOCALAPPDATA") if local_app_data is None else local_app_data
-        )
-        if local_app_data:
-            return pathlib.Path(local_app_data) / "yun" / "targets.json"
-        return home / "AppData" / "Local" / "yun" / "targets.json"
+        # Microsoft Store Python virtualizes %LOCALAPPDATA% per package. Keep
+        # this shared control-plane state outside that virtualized location.
+        return home / ".yun" / "targets.json"
     return home / ".config" / "yun" / "targets.json"
 
 

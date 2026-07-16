@@ -24,10 +24,10 @@ python scripts/yunctl.py --help
 ```
 
 默认私钥仍位于 `%USERPROFILE%\.ssh`。运行时注册表在
-`%LOCALAPPDATA%\yun\targets.json`（没有 `LOCALAPPDATA` 时回退到
-`%USERPROFILE%\AppData\Local\yun\targets.json`），而 Linux/macOS 继续使用
-`~/.config/yun/targets.json`。工具会以 `icacls` 收紧私钥和注册表 ACL；不要把
-PEM 放在同步盘、共享目录或版本库中。
+`%USERPROFILE%\.yun\targets.json`，而 Linux/macOS 继续使用
+`~/.config/yun/targets.json`。该位置避免 Microsoft Store Python 对
+`%LOCALAPPDATA%` 的按包重定向，因此不同 Python 安装会共用同一份状态。工具会
+以 `icacls` 收紧私钥和注册表 ACL；不要把 PEM 放在同步盘、共享目录或版本库中。
 
 ## 换一台电脑
 

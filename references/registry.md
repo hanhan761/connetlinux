@@ -1,9 +1,11 @@
 # 本机目标登记表
 
 `yunctl.py` resolves the registry from `YUN_TARGETS_FILE` when set; otherwise it
-uses `~/.config/yun/targets.json`. It is reproducible cache: `import-pem` can
-rebuild an entry and its dedicated host-key file from one self-describing PEM.
-It contains operational metadata, not credentials, but must not be committed.
+uses `~/.config/yun/targets.json` on Linux/macOS and
+`%USERPROFILE%\.yun\targets.json` on Windows. It is reproducible cache:
+`import-pem` can rebuild an entry and its dedicated host-key file from one
+self-describing PEM. It contains operational metadata, not credentials, but
+must not be committed.
 
 Create or inspect it with:
 
